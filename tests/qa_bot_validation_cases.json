@@ -1,0 +1,17 @@
+{
+  "rationale": "The verifier checks read counts but leaves a gap in value coverage. The inverted fixture duplicates live_bot, so validation exercises only two distinct complete snapshots, an empty object, and an upstream failure. In two replays, some partial snapshots returned all nulls despite containing boolean values, even though each execution made exactly one read. Keep the original contract and fixtures. Add the replay inputs and cases that isolate each flag's true and false values, mix omitted keys with explicit nulls, and cover uniform boolean snapshots. Assert exactly one read and exact equality with the three expected keys on every execution. Run differing snapshots consecutively on the same loaded candidate to exercise the no-caching requirement.",
+  "cases": [
+    "{\"auto_answer\":false}",
+    "{\"general_knowledge\":true,\"answer_ref\":false}",
+    "{\"answer_ref\":null}",
+    "{\"auto_answer\":true,\"general_knowledge\":null}",
+    "{\"auto_answer\":true}",
+    "{\"general_knowledge\":false}",
+    "{\"general_knowledge\":true}",
+    "{\"answer_ref\":false}",
+    "{\"answer_ref\":true}",
+    "{\"auto_answer\":false,\"general_knowledge\":false,\"answer_ref\":false}",
+    "{\"auto_answer\":true,\"general_knowledge\":true,\"answer_ref\":true}",
+    "{\"auto_answer\":null,\"answer_ref\":true}"
+  ]
+}
