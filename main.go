@@ -18,6 +18,8 @@ import (
 
 	"newmcp/mcp-bridge/internal/bridge"
 	"newmcp/mcp-bridge/internal/cliadapter"
+
+	"newmcp/mcp-bridge/internal/terminal"
 )
 
 func main() {
@@ -36,7 +38,7 @@ func main() {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: mcp-bridge serve|stdio|cli [-data DIR] [-listen 127.0.0.1:8088]")
+		return errors.New("usage: mcp-bridge serve|stdio|cli|run [-data DIR] [-listen 127.0.0.1:8088]")
 	}
 	if os.Args[1] == "cli" {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -47,6 +49,10 @@ func run() error {
 	const defaultDir = "~/.mcp-bridge"
 	dir := fs.String("data", defaultDir, "private state directory")
 	listen := fs.String("listen", "127.0.0.1:8088", "HTTP address (TLS terminating proxy for remote clients)")
+	var delivery string
+	if os.Args[1] == "run" {
+		fs.StringVar(&delivery, "delivery", "inbox", "inbox or auto")
+	}
 	var scopePerProcess bool
 	if os.Args[1] == "stdio" {
 		fs.BoolVar(&scopePerProcess, "one-task-per-process", false, "use a fresh scope for a stdio process dedicated to one task")
@@ -67,12 +73,23 @@ func run() error {
 		return e
 	}
 	socket := filepath.Join(abs, "bridge.sock")
+	if os.Args[1] == "run" {
+		return terminal.Run(socket, delivery, fs.Args())
+	}
 	if os.Args[1] == "stdio" {
 		c, e := net.Dial("unix", socket)
 		if e != nil {
 			return e
 		}
 		defer c.Close()
+		if token := os.Getenv(terminal.Env); token != "" {
+			if len(token) != 64 {
+				return errors.New("invalid terminal binding")
+			}
+			if _, e = fmt.Fprintf(c, "B%s\n", token); e != nil {
+				return e
+			}
+		}
 		// A long-lived client can multiplex unrelated tasks on a single MCP connection.
 		// Only infer a scope when its launcher explicitly declares a task boundary.
 		scope := os.Getenv("BRIDGE_TASK_SCOPE")

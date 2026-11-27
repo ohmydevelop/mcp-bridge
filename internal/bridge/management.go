@@ -87,7 +87,12 @@ func (b *Bridge) management(v *view) {
 		if err := rows.Err(); err != nil {
 			return nil, err
 		}
-		return Object{"published_tools": revisions["binding"], "webhooks": revisions["destination"], "sources": ready, "recent_changes": changes, "deliveries": counts, "backlog": backlog, "version": mcpinfo.Implementation.Version}, err
+		destinations, err := b.destinationStatus(v.user, revisions["destination"])
+		if err != nil {
+			return nil, err
+		}
+		current, _ := ctx.Value(terminalBinding{}).(string)
+		return Object{"destinations": destinations, "current_terminal": current, "published_tools": revisions["binding"], "webhooks": revisions["destination"], "sources": ready, "recent_changes": changes, "deliveries": counts, "backlog": backlog, "version": mcpinfo.Implementation.Version}, err
 	})
 }
 

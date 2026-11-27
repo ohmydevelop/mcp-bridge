@@ -19,6 +19,13 @@ func (b *Bridge) lifecycleTools(v *view) {
 		}
 		b.modify.Lock()
 		defer b.modify.Unlock()
+		var d Destination
+		if _, err := b.store.Get("destination", in.ID, &d); err != nil {
+			return nil, err
+		}
+		if d.kind() != "webhook" {
+			return nil, errors.New("destination is host-managed")
+		}
 		flows, e := storage.List[Flow](b.store, "flow")
 		if e != nil {
 			return nil, e

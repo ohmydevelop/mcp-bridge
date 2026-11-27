@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"database/sql"
@@ -8,15 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
+	"io"
 	"log"
 	"net"
 	"net/http"
-
+	"newmcp/mcp-bridge/internal/terminal"
 	"os"
 	"os/signal"
 	"path/filepath"
-
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -83,6 +84,9 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 			}
 		}
 	}
+	if e = b.loadLocalDestinations(); e != nil {
+		return e
+	}
 	if e = b.migrateTriggers(); e != nil {
 		return e
 	}
@@ -112,12 +116,26 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 			}
 			jobs.Go(func() {
 				defer conn.Close()
-				done := context.AfterFunc(ctx, func() { conn.Close() })
-				defer done()
-				_ = b.server(Principal{localIdentity}).Run(ctx, eventTransport{&mcp.IOTransport{Reader: conn, Writer: conn}, b, Principal{localIdentity}})
+				b.localConnection(ctx, conn)
 			})
 		}
 	})
+	for _, preset := range b.presets {
+		jobs.Go(func() {
+			t := time.NewTicker(250 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					if err := b.processCLI(ctx, preset); err != nil && !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+						log.Print("cli delivery: ", err)
+					}
+				}
+			}
+		})
+	}
 	handlers := map[string]http.Handler{}
 	for name := range tokens {
 		p := Principal{name}
@@ -160,6 +178,9 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 				return
 			case now := <-ticker.C:
 				if minute := now.Truncate(time.Minute); minute != checked {
+					if _, err := b.store.DB.Exec("UPDATE deliveries SET status='unknown',error='submission receipt expired' WHERE status='submitting' AND next < unixepoch()-30 AND id IN (SELECT id FROM local_deliveries WHERE kind='terminal_session')"); err != nil && ctx.Err() == nil {
+						log.Print("terminal receipts: ", err)
+					}
 					if err := b.scheduleDue(now); err != nil && ctx.Err() == nil {
 						log.Print("scheduler: ", err)
 					} else {
@@ -244,4 +265,44 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 		r.session.Close()
 	}
 	return e
+}
+
+func (b *Bridge) localConnection(ctx context.Context, c net.Conn) {
+	done := context.AfterFunc(ctx, func() { c.Close() })
+	defer done()
+	r := bufio.NewReader(c)
+	first, err := r.Peek(1)
+	if err != nil {
+		return
+	}
+	switch first[0] {
+	case 'T':
+		r.ReadByte()
+		var req terminal.Request
+		if err = json.NewDecoder(io.LimitReader(r, 2048)).Decode(&req); err != nil {
+			return
+		}
+		reply, err := b.terminalRequest(req)
+		if err != nil {
+			reply.Error = err.Error()
+		}
+		json.NewEncoder(c).Encode(reply)
+		return
+	case 'B':
+		r.ReadByte()
+		line, err := r.ReadSlice('\n')
+		if err != nil || len(line) != 65 {
+			return
+		}
+		id := terminal.ID(strings.TrimSuffix(string(line), "\n"))
+		if !b.terminalOnline(id) {
+			return
+		}
+		ctx = context.WithValue(ctx, terminalBinding{}, id)
+	}
+	reader := struct {
+		io.Reader
+		io.Closer
+	}{r, c}
+	_ = b.server(Principal{localIdentity}).Run(ctx, eventTransport{&mcp.IOTransport{Reader: reader, Writer: c}, b, Principal{localIdentity}})
 }

@@ -308,7 +308,9 @@ func (b *Bridge) eventTools(v *view) {
 			if _, err := b.store.Get("destination", d.ID, &previous); err != nil {
 				return nil, err
 			}
-
+			if previous.kind() != "webhook" {
+				return nil, errors.New("destination is host-managed")
+			}
 			d.Owner = previous.Owner
 		}
 		return Object{"revision": in.Revision + 1}, b.store.Put(p.Name, "destination", d.ID, d, in.Revision)
@@ -335,7 +337,12 @@ func (b *Bridge) eventTools(v *view) {
 		}
 		if in.Destination != "" {
 			f.Destination = in.Destination
-
+			if f.Destination == "current_terminal" {
+				f.Destination, _ = ctx.Value(terminalBinding{}).(string)
+				if f.Destination == "" {
+					return nil, errors.New("no verified terminal binding")
+				}
+			}
 		}
 		if in.Instruction != nil {
 			f.Instruction = *in.Instruction
@@ -360,8 +367,16 @@ func (b *Bridge) eventTools(v *view) {
 			}
 			choices := []Object{}
 			for _, d := range ds {
+				if d.kind() == "terminal_session" && !b.terminalOnline(d.ID) {
+					continue
+				}
+				if d.kind() == "cli_process" {
+					if _, ok := b.presets[d.ID]; !ok {
+						continue
+					}
+				}
 				if canUse(f.Owner, d.Owner, d.Grants) {
-					choices = append(choices, Object{"id": d.ID, "description": d.Description, "type": "webhook"})
+					choices = append(choices, Object{"id": d.ID, "description": d.Description, "type": d.kind()})
 				}
 			}
 			if len(choices) != 1 {
@@ -457,7 +472,24 @@ func (b *Bridge) enqueueDelivery(tx *sql.Tx, id, flow, destination string, body 
 		return err
 	}
 	_, err = tx.Exec("INSERT INTO deliveries(id,flow,destination,data,status,next) VALUES(?,?,?,?,'pending',unixepoch())", id, flow, destination, raw)
-
+	if err != nil || flow == "" {
+		return err
+	}
+	var rawDest []byte
+	err = tx.QueryRow("SELECT data FROM objects WHERE kind='destination' AND id=?", destination).Scan(&rawDest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var d Destination
+	if err = b.store.Decode("destination", destination, rawDest, &d); err != nil {
+		return err
+	}
+	if d.kind() != "webhook" {
+		_, err = tx.Exec("INSERT INTO local_deliveries(id,kind) VALUES(?,?)", id, d.Type)
+	}
 	return err
 }
 
@@ -465,7 +497,7 @@ func (b *Bridge) deliver(ctx context.Context) error {
 	var id, flow, dest string
 	var raw []byte
 	var tries int
-	e := b.store.DB.QueryRowContext(ctx, "SELECT id,flow,destination,data,attempt FROM deliveries WHERE status='pending' AND next<=? ORDER BY next,rowid LIMIT 1", time.Now().Unix()).Scan(&id, &flow, &dest, &raw, &tries)
+	e := b.store.DB.QueryRowContext(ctx, "SELECT id,flow,destination,data,attempt FROM deliveries WHERE status='pending' AND next<=? AND id NOT IN (SELECT id FROM local_deliveries) ORDER BY next,rowid LIMIT 1", time.Now().Unix()).Scan(&id, &flow, &dest, &raw, &tries)
 	if e != nil {
 		return e
 	}

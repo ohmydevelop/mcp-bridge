@@ -175,7 +175,7 @@ func (b *Bridge) triggerQueries(v *view) {
 		if err != nil || f.Owner != p.Name {
 			return nil, errors.New("trigger unavailable")
 		}
-		rows, err := b.store.DB.Query("SELECT d.id,d.status,d.attempt,d.error,'webhook' FROM deliveries d WHERE flow=? ORDER BY d.rowid DESC LIMIT 50", f.ID)
+		rows, err := b.store.DB.Query("SELECT d.id,d.status,d.attempt,d.error,COALESCE(l.kind,'webhook') FROM deliveries d LEFT JOIN local_deliveries l ON l.id=d.id WHERE flow=? ORDER BY d.rowid DESC LIMIT 50", f.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -419,6 +419,22 @@ func (b *Bridge) runDetails(p Principal, trigger, id string) (Object, error) {
 	err = b.store.DB.QueryRow("SELECT status FROM deliveries WHERE id=?", id).Scan(&delivery)
 	if err == nil {
 		r["delivery"] = delivery
+		var kind string
+		var blob []byte
+		err = b.store.DB.QueryRow("SELECT kind,result FROM local_deliveries WHERE id=?", id).Scan(&kind, &blob)
+		if errors.Is(err, sql.ErrNoRows) {
+			kind = "webhook"
+		} else if err != nil {
+			return nil, err
+		}
+		r["destination_type"] = kind
+		if len(blob) > 0 {
+			var result Object
+			if err = b.store.Decode("delivery-result", id, blob, &result); err != nil {
+				return nil, err
+			}
+			r["delivery_result"] = result
+		}
 
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err

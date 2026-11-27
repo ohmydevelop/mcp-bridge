@@ -53,9 +53,10 @@ type view struct {
 	uris    []string
 }
 type Bridge struct {
-	registerApp func(*mcp.Server)
-	profiles    map[string]Profile
-
+	registerApp   func(*mcp.Server)
+	profiles      map[string]Profile
+	presets       map[string]cliPreset
+	terminals     sync.Map
 	verified      sync.Map
 	activeStreams sync.Map
 	pollSchedule  sync.Map
