@@ -1,0 +1,22 @@
+[Unit]
+Description=MCP bridge
+After=network-online.target
+
+[Service]
+Type=simple
+User=mcp-bridge
+Group=mcp-bridge
+UMask=0077
+EnvironmentFile=/etc/mcp-bridge/bridge.env
+StateDirectory=mcp-bridge
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/mcp-bridge serve -data /var/lib/mcp-bridge -listen 127.0.0.1:8088
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
