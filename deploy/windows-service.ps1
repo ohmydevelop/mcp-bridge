@@ -31,13 +31,26 @@ function New-PrivateDirectory($path) {
 }
 
 function Stop-BridgeTask($existing) {
-    if ($existing.State -ne 'Running') { return }
-    Stop-ScheduledTask -InputObject $existing
-    for ($i = 0; $i -lt 50; $i++) {
-        if ((Get-ScheduledTask -TaskName $task).State -ne 'Running') { return }
-        Start-Sleep -Milliseconds 200
+    if ($existing.State -eq 'Running') {
+        Stop-ScheduledTask -InputObject $existing
+        for ($i = 0; $i -lt 50; $i++) {
+            if ((Get-ScheduledTask -TaskName $task).State -ne 'Running') { break }
+            Start-Sleep -Milliseconds 200
+        }
+        if ((Get-ScheduledTask -TaskName $task).State -eq 'Running') {
+            throw "Scheduled task did not stop: $task"
+        }
     }
-    throw "Scheduled task did not stop: $task"
+    # Task Scheduler can stop the PowerShell action before its daemon exits.
+    $serviceArgs = '\s+serve\s+-data\s+"?' + [regex]::Escape($state) + '"?\s+-listen\s+127\.0\.0\.1:8088\s*$'
+    foreach ($entry in Get-CimInstance Win32_Process -Filter "Name = 'mcp-bridge.exe'") {
+        if ($entry.ExecutablePath -ne $binary -or $entry.CommandLine -notmatch $serviceArgs) { continue }
+        $child = Get-Process -Id $entry.ProcessId -ErrorAction SilentlyContinue
+        if ($child -and $child.Path -eq $binary -and [Math]::Abs(($child.StartTime.ToUniversalTime() - $entry.CreationDate.ToUniversalTime()).TotalMilliseconds) -lt 1) {
+            $child.Kill()
+            if (-not $child.WaitForExit(10000)) { throw "Bridge daemon did not stop" }
+        }
+    }
 }
 
 function New-Secret {
