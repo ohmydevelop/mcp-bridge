@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"context"
 	"newmcp/mcp-bridge/internal/storage"
 	"sort"
 	"strings"
@@ -101,4 +102,29 @@ func (b *Bridge) searchTools(p Principal, q inputQuery) (Object, error) {
 		}
 	}
 	return searchPage("tools", hits, q), nil
+}
+func (b *Bridge) searchEvents(ctx context.Context, p Principal, q inputQuery) (Object, error) {
+	var ids []string
+	b.mu.RLock()
+	for id, s := range b.sources {
+		if allowed(p, s) && !s.Disabled {
+			ids = append(ids, id)
+		}
+	}
+	b.mu.RUnlock()
+	ids = append(ids, "bridge.builtin")
+	var hits []searchHit
+	for _, id := range ids {
+		if q.Source != "" && q.Source != id {
+			continue
+		}
+		defs, e := b.eventTypes(ctx, p, id)
+		if e != nil {
+			return nil, e
+		}
+		for _, d := range defs {
+			hits = append(hits, searchHit{id + "/" + d.Name, d.Name, d.Description, b.aliases(id, "event:"+d.Name), Object{"source_id": id, "event_name": d.Name, "description": d.Description, "filter_schema": d.Input, "delivery": d.Delivery}})
+		}
+	}
+	return searchPage("events", hits, q), nil
 }

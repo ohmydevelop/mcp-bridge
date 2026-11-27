@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	js "github.com/santhosh-tekuri/jsonschema/v6"
 
 	"newmcp/mcp-bridge/internal/mcpinfo"
 	"newmcp/mcp-bridge/internal/pyrunner"
+	"newmcp/mcp-bridge/internal/storage"
 )
 
 type PythonScript struct {
@@ -80,12 +82,19 @@ func (b *Bridge) runBinding(ctx context.Context, p Principal, id string, args an
 }
 
 func (b *Bridge) executePython(ctx context.Context, p Principal, script PythonScript, input Object, toolID string, revision int) (*mcp.CallToolResult, error) {
+	metrics := &bindingReads{}
+	if rec, _ := ctx.Value(backgroundKey{}).(*executionRecord); rec == nil || !rec.Offline {
+		defer b.reportReads(ctx, toolID, revision, time.Now(), metrics, script.Script)
+	}
 	val, err := pyrunner.Run(ctx, script.Script, input, false, func(ctx context.Context, ref string, args map[string]any) (any, error) {
 		if !member(script.Uses, ref) {
 			return nil, errors.New("undeclared Python tool")
 		}
+		if rec, ok := ctx.Value(backgroundKey{}).(*executionRecord); ok && rec.Offline {
+			return rec.read(ref, args)
+		}
 		src, name, _ := strings.Cut(ref, "/")
-		r, err := b.callUpstream(ctx, p, src, name, args)
+		r, err := b.callUpstream(ctx, p, src, name, args, metrics.record)
 		if err != nil {
 			return nil, err
 		}
@@ -95,6 +104,9 @@ func (b *Bridge) executePython(ctx context.Context, p Principal, script PythonSc
 		var value any = r.StructuredContent
 		if value == nil {
 			value = r.Content
+		}
+		if rec, ok := ctx.Value(backgroundKey{}).(*executionRecord); ok {
+			rec.record(ref, args, value)
 		}
 		return value, nil
 	})
@@ -139,18 +151,23 @@ func (b *Bridge) bindingTools(v *view) {
 	mcp.AddTool(v.server, &mcp.Tool{Name: mcpinfo.ExecuteScript, Description: "Run a one-off Python script without publishing it. Define run(args, ctx), declare upstream tool IDs in uses, and return a JSON value."}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		PythonScript
 		Arguments Object `json:"arguments"`
+		TaskScope string `json:"task_scope,omitempty"`
 	}) (*mcp.CallToolResult, any, error) {
-		if err := b.validateScript(v.user, in.PythonScript); err != nil {
+		ctx, err := scopedContext(ctx, in.TaskScope, req.Params.Meta)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err = b.validateScript(v.user, in.PythonScript); err != nil {
 			return nil, nil, err
 		}
 		result, err := b.executePython(ctx, v.user, in.PythonScript, in.Arguments, mcpinfo.ExecuteScript, 0)
 		return result, nil, err
 	})
-	tool(v.server, "bridge_save_tool", "Publish or preview a custom business tool. Supply a Python script and its allowed upstream tools (uses).", func(ctx context.Context, in struct {
+	tool(v.server, "bridge_save_tool", "Publish or preview a custom business tool. Supply a Python script and its allowed upstream tools (uses). On verified promotion, pass origin_delivery_id to notify the triggering Codex thread.", func(ctx context.Context, in struct {
 		Binding
-
-		Revision int  `json:"revision,omitempty"`
-		Dry      bool `json:"dry_run,omitempty"`
+		OriginDelivery string `json:"origin_delivery_id,omitempty"`
+		Revision       int    `json:"revision,omitempty"`
+		Dry            bool   `json:"dry_run,omitempty"`
 	}) (any, error) {
 		def := in.Binding
 		if !mcpinfo.ValidToolName(def.ID) || strings.TrimSpace(def.Description) == "" {
@@ -174,7 +191,13 @@ func (b *Bridge) bindingTools(v *view) {
 		if in.Dry {
 			return Object{"valid": true}, nil
 		}
-		if e := b.store.Put(v.user.Name, "binding", def.ID, def, in.Revision); e != nil {
+		var e error
+		if in.OriginDelivery != "" {
+			e = b.publishForTrigger(ctx, v.user.Name, def, in.Revision, in.OriginDelivery)
+		} else {
+			e = b.store.Put(v.user.Name, "binding", def.ID, def, in.Revision)
+		}
+		if e != nil {
 			return nil, e
 		}
 		saved, err := b.store.Get("binding", def.ID, &def)
@@ -190,6 +213,15 @@ func (b *Bridge) bindingTools(v *view) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
 		id := strings.TrimPrefix(in.ID, "bridge.builtin/")
+		flows, err := storage.List[Flow](b.store, "flow")
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range flows {
+			if f.Handler != nil && f.Handler.ID == "bridge.builtin/"+id {
+				return nil, fmt.Errorf("tool referenced by trigger %s", f.ID)
+			}
+		}
 		if e := b.store.Put(v.user.Name, "binding", id, nil, in.Revision); e != nil {
 			return nil, e
 		}

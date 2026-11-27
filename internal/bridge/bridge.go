@@ -40,6 +40,7 @@ type Source struct {
 	Disabled bool              `json:"disabled,omitempty"`
 }
 type backend struct {
+	hub       *streamHub
 	resources []*mcp.Resource
 	prompts   []*mcp.Prompt
 	session   *mcp.ClientSession
@@ -55,7 +56,6 @@ type Bridge struct {
 	registerApp func(*mcp.Server)
 	profiles    map[string]Profile
 
-	terminals     sync.Map
 	verified      sync.Map
 	activeStreams sync.Map
 	pollSchedule  sync.Map

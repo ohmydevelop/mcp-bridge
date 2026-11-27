@@ -2,18 +2,17 @@ package bridge
 
 import (
 	"context"
-	"fmt"
-	"newmcp/mcp-bridge/internal/storage"
 
 	"encoding/json"
 	"errors"
-
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"newmcp/mcp-bridge/internal/mcpinfo"
+	"newmcp/mcp-bridge/internal/storage"
 )
 
 type inputID struct {
@@ -58,6 +57,11 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 	if v := b.views[p]; v != nil {
 		return v.server
 	}
+	if source := b.profiles[p.Name].Producer; source != "" {
+		s := mcp.NewServer(mcpinfo.Implementation, nil)
+		b.producerTool(s, source)
+		return s
+	}
 	s := mcp.NewServer(mcpinfo.Implementation, serverOptions())
 	v := &view{user: p, server: s}
 	b.views[p] = v
@@ -87,11 +91,16 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		return Object{"sources": out, "next_offset": n}, nil
 	})
 	tool(s, "search_tools", "Find a business tool by intent, optionally within one source. Use call_tool with the returned ID and schema.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchTools(p, q) })
-	mcp.AddTool(s, &mcp.Tool{Name: "call_tool", Description: "Call a discovered tool using its source-qualified ID."}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
+	mcp.AddTool(s, &mcp.Tool{Name: "call_tool", Description: "Call a discovered tool using its source-qualified ID. Codex reads use the current turn automatically. Supply task_scope to override."}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
+		TaskScope string `json:"task_scope,omitempty"`
 		ID        string `json:"tool_id"`
 		Arguments Object `json:"arguments"`
 	}) (*mcp.CallToolResult, any, error) {
 		src, n, _ := strings.Cut(in.ID, "/")
+		ctx, e := scopedContext(ctx, in.TaskScope, req.Params.Meta)
+		if e != nil {
+			return nil, nil, e
+		}
 		r, e := b.call(ctx, p, src, n, in.Arguments)
 		return r, nil, e
 	})
@@ -101,6 +110,15 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 	}) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
+		flows, e := storage.List[Flow](b.store, "flow")
+		if e != nil {
+			return nil, e
+		}
+		for _, f := range flows {
+			if f.Source == in.ID {
+				return nil, fmt.Errorf("source referenced by flow %s", f.ID)
+			}
+		}
 		defs, e := storage.List[Binding](b.store, "binding")
 		if e != nil {
 			return nil, e
@@ -115,16 +133,17 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		if in.Revision < 1 {
 			return nil, errors.New("existing revision required")
 		}
-		if e := b.store.Put(p.Name, "source", in.ID, nil, in.Revision); e != nil {
+		if e = b.store.Put(p.Name, "source", in.ID, nil, in.Revision); e != nil {
 			return nil, e
 		}
 		b.replace(Source{ID: in.ID}, nil, true)
 		return Object{"removed": in.ID}, nil
 	})
-
+	b.lifecycleTools(v)
 	b.bindingTools(v)
+	b.management(v)
 	b.sourceTools(v)
-
+	b.eventTools(v)
 	b.skillTools(v)
 	if b.registerApp != nil {
 		b.registerApp(s)

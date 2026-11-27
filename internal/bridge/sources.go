@@ -3,7 +3,7 @@ package bridge
 import (
 	"context"
 	"database/sql"
-
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -92,6 +93,9 @@ func (b *Bridge) saveSource(ctx context.Context, p Principal, src Source, rev in
 	if src.Disabled {
 		state["state"] = "disabled"
 	}
+	if e == nil && rev == 0 {
+		e = b.appendEvents(ctx, "bridge.builtin", []Occurrence{{ID: uuid.NewString(), Name: "source.added", Data: Object{"source_id": src.ID}}}, "", nil)
+	}
 	return state, e
 }
 func (b *Bridge) reconcile(ctx context.Context, src Source) (any, error) {
@@ -123,10 +127,22 @@ func (h headersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for k, v := range h.headers {
 		r.Header.Set(k, v)
 	}
+	if method := r.Header.Get("Mcp-Method"); extensionNamed(method) && req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		defer body.Close()
+		var q streamRequest
+		if err := json.NewDecoder(body).Decode(&q); err != nil {
+			return nil, err
+		}
+		r.Header.Set("Mcp-Name", q.Params.Name)
+	}
 	return http.DefaultTransport.RoundTrip(r)
 }
 func connect(ctx context.Context, src Source) (*backend, error) {
-
+	hub := &streamHub{}
 	var transport mcp.Transport
 	switch src.Type {
 	case "stdio":
@@ -136,7 +152,7 @@ func connect(ctx context.Context, src Source) (*backend, error) {
 		for k, v := range src.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
-		transport = &mcp.CommandTransport{Command: cmd}
+		transport = upstreamTransport{&mcp.CommandTransport{Command: cmd}, hub}
 	case "sse":
 		transport = &mcp.SSEClientTransport{Endpoint: src.URL, HTTPClient: &http.Client{Transport: headersTransport{src.Headers}, CheckRedirect: rejectRedirect}}
 	case "streamable-http":
@@ -151,7 +167,7 @@ func connect(ctx context.Context, src Source) (*backend, error) {
 	if e != nil {
 		return nil, e
 	}
-	r, err := readCatalog(ctx, session)
+	r, err := readCatalog(ctx, session, hub)
 	if err != nil {
 		session.Close()
 	}

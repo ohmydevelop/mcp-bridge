@@ -16,13 +16,13 @@ const eventsExt = "io.modelcontextprotocol/events"
 
 type extParams struct {
 	mcp.ParamsBase
-
-	TTL       *int64 `json:"ttlMs,omitempty"`
-	URI       string `json:"uri,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Cursor    any    `json:"cursor,omitempty"`
-	Arguments Object `json:"arguments,omitempty"`
-	MaxEvents int    `json:"maxEvents,omitempty"`
+	Delivery  *callback `json:"delivery,omitempty"`
+	TTL       *int64    `json:"ttlMs,omitempty"`
+	URI       string    `json:"uri,omitempty"`
+	Name      string    `json:"name,omitempty"`
+	Cursor    any       `json:"cursor,omitempty"`
+	Arguments Object    `json:"arguments,omitempty"`
+	MaxEvents int       `json:"maxEvents,omitempty"`
 }
 type extResult struct {
 	mcp.ResultBase
@@ -35,15 +35,15 @@ func complete(obj Object) *extResult                { obj["resultType"] = "compl
 func serverOptions() *mcp.ServerOptions {
 	caps := &mcp.ServerCapabilities{}
 	caps.AddExtension(skillsExt, Object{})
-
+	caps.AddExtension(eventsExt, Object{})
 	return &mcp.ServerOptions{Capabilities: caps, SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = "private"; c.TTLMs = 0 }}
 }
 func newClient() *mcp.Client {
 	caps := &mcp.ClientCapabilities{}
 	caps.AddExtension(skillsExt, Object{})
-
+	caps.AddExtension(eventsExt, Object{})
 	c := mcp.NewClient(mcpinfo.Implementation, &mcp.ClientOptions{Capabilities: caps, MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true}})
-	for _, m := range []string{"skills/list", "skills/get"} {
+	for _, m := range []string{"skills/list", "skills/get", "events/list", "events/poll", "events/stream", "events/subscribe", "events/unsubscribe"} {
 		if e := mcp.AddSendingCustomMethod[*extParams, *extResult](c, m); e != nil {
 			panic(e)
 		}

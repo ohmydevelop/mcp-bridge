@@ -20,8 +20,8 @@ func resourceURI(source, uri string) string {
 	}
 	return scheme + "://mcp-bridge-source/" + source + "/" + base64.RawURLEncoding.EncodeToString([]byte(uri))
 }
-func readCatalog(ctx context.Context, session *mcp.ClientSession) (*backend, error) {
-	next := &backend{session: session, tools: map[string]*mcp.Tool{}}
+func readCatalog(ctx context.Context, session *mcp.ClientSession, hub *streamHub) (*backend, error) {
+	next := &backend{hub: hub, session: session, tools: map[string]*mcp.Tool{}}
 	cap := session.InitializeResult().Capabilities
 	if cap == nil {
 		return nil, errors.New("missing server capabilities")
@@ -53,7 +53,7 @@ func readCatalog(ctx context.Context, session *mcp.ClientSession) (*backend, err
 	return next, nil
 }
 func (b *Bridge) refreshCatalog(ctx context.Context, src Source, r *backend) error {
-	next, err := readCatalog(ctx, r.session)
+	next, err := readCatalog(ctx, r.session, r.hub)
 	if err != nil {
 		return err
 	}

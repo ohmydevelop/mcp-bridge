@@ -3,7 +3,7 @@ package bridge
 import (
 	"bytes"
 	"context"
-
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +32,11 @@ type Skill struct {
 	remote   *mcp.ClientSession
 }
 
+const guide = "---\nname: setup-webhook\ndescription: Route an event to an agent automation.\n---\nUse bridge_list_sources, then search_event_types. Select a configured destination and call save_trigger. Check get_trigger for delivery status."
+
+//go:embed improve-trigger.md
+var improveTrigger []byte
+
 func localSkill(id, name string, files map[string][]byte) (Skill, error) {
 	prefix := "skill://" + id + "/" + name + "/"
 	s := Skill{URI: prefix + "SKILL.md", bytes: map[string][]byte{}}
@@ -55,6 +60,17 @@ func localSkill(id, name string, files map[string][]byte) (Skill, error) {
 }
 func (b *Bridge) skillCatalog(ctx context.Context, p Principal, source string) ([]Skill, error) {
 	list := []Skill{}
+	if source == "" || source == "bridge.builtin" {
+		s, e := localSkill("bridge.builtin", "setup-webhook", map[string][]byte{"SKILL.md": []byte(guide)})
+		if e != nil {
+			return nil, e
+		}
+		improve, err := localSkill("bridge.builtin", "improve-trigger", map[string][]byte{"SKILL.md": improveTrigger})
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, s, improve)
+	}
 	b.mu.RLock()
 	sources := []Source{}
 	sessions := map[string]*mcp.ClientSession{}
