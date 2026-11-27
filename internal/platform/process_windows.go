@@ -108,6 +108,15 @@ func supervise(args []string) (uint32, error) {
 		return 0, errors.New("originating process has exited")
 	}
 	isolated := args[0] == "python"
+	var security securityCapabilities
+	if isolated {
+		sid, cleanup, err := workerProfile()
+		if err != nil {
+			return 0, err
+		}
+		defer cleanup()
+		security.Package = sid
+	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return 0, err
@@ -131,12 +140,7 @@ func supervise(args []string) (uint32, error) {
 	if err = attrs.Update(attributeJobList, unsafe.Pointer(&job), unsafe.Sizeof(job)); err != nil {
 		return 0, err
 	}
-	var security securityCapabilities
 	if isolated {
-		security.Package, err = pythonSID()
-		if err != nil {
-			return 0, err
-		}
 		if err = attrs.Update(attributeSecurityCapabilities, unsafe.Pointer(&security), unsafe.Sizeof(security)); err != nil {
 			return 0, err
 		}

@@ -40,7 +40,8 @@ var improveTrigger []byte
 func localSkill(id, name string, files map[string][]byte) (Skill, error) {
 	prefix := "skill://" + id + "/" + name + "/"
 	s := Skill{URI: prefix + "SKILL.md", bytes: map[string][]byte{}}
-	parts := bytes.SplitN(files["SKILL.md"], []byte("---\n"), 3)
+	frontmatter := bytes.ReplaceAll(files["SKILL.md"], []byte("\r\n"), []byte("\n"))
+	parts := bytes.SplitN(frontmatter, []byte("---\n"), 3)
 	if len(parts) != 3 || len(parts[0]) != 0 {
 		return s, errors.New("invalid skill frontmatter")
 	}

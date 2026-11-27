@@ -18,26 +18,32 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/google/uuid"
 	"golang.org/x/sys/windows"
 )
 
-var derivePackageSID = windows.NewLazySystemDLL("userenv.dll").NewProc("DeriveAppContainerSidFromAppContainerName")
+var userenv = windows.NewLazySystemDLL("userenv.dll")
+var createProfile = userenv.NewProc("CreateAppContainerProfile")
+var deleteProfile = userenv.NewProc("DeleteAppContainerProfile")
 
-// A profile-less AppContainer has no private, writable package directory.
-// The package SID is also used by the ACL on the read-only interpreter view.
-func pythonSID() (*windows.SID, error) {
-	name, err := windows.UTF16PtrFromString("MCPBridge.NativePython")
+// Each worker gets a fresh private profile, including its temporary directory.
+func workerProfile() (*windows.SID, func(), error) {
+	name, err := windows.UTF16PtrFromString("MCPBridge." + uuid.NewString())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	n := uintptr(unsafe.Pointer(name))
 	var sid *windows.SID
-	hr, _, _ := derivePackageSID.Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&sid)))
+	hr, _, _ := createProfile.Call(n, n, n, 0, 0, uintptr(unsafe.Pointer(&sid)))
 	runtime.KeepAlive(name)
 	if int32(hr) < 0 {
-		return nil, fmt.Errorf("derive Python AppContainer SID: HRESULT %#08x", uint32(hr))
+		return nil, nil, fmt.Errorf("create AppContainer profile: HRESULT %#08x", uint32(hr))
 	}
-	defer windows.FreeSid(sid)
-	return sid.Copy()
+	return sid, func() {
+		windows.FreeSid(sid)
+		deleteProfile.Call(uintptr(unsafe.Pointer(name)))
+		runtime.KeepAlive(name)
+	}, nil
 }
 
 var pythonDLL = regexp.MustCompile(`^(python3[0-9]*t?|vcruntime[0-9_]+)\.dll$`)
@@ -73,7 +79,7 @@ func imageFiles(ctx context.Context, python string, modules map[string]bool) ([]
 	base := filepath.Base(python)
 	var files []imageFile
 	hash := sha256.New()
-	fmt.Fprintf(hash, "v2\x00%s\x00", python)
+	fmt.Fprintf(hash, "v3\x00%s\x00", python)
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -141,7 +147,7 @@ func readOnlyView(dir string) error {
 	if err != nil {
 		return err
 	}
-	sid, err := pythonSID()
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinAnyPackageSid)
 	if err != nil {
 		return err
 	}
