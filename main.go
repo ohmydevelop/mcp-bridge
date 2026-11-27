@@ -16,9 +16,10 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"newmcp/mcp-bridge/internal/bridge"
 	"newmcp/mcp-bridge/internal/cliadapter"
-
+	"newmcp/mcp-bridge/internal/mcpapp"
 	"newmcp/mcp-bridge/internal/terminal"
 )
 
@@ -53,7 +54,10 @@ func run() error {
 	if os.Args[1] == "run" {
 		fs.StringVar(&delivery, "delivery", "inbox", "inbox or auto")
 	}
-	var scopePerProcess bool
+	var app, scopePerProcess bool
+	if os.Args[1] == "serve" {
+		fs.BoolVar(&app, "app", false, "enable the management MCP App")
+	}
 	if os.Args[1] == "stdio" {
 		fs.BoolVar(&scopePerProcess, "one-task-per-process", false, "use a fresh scope for a stdio process dedicated to one task")
 	}
@@ -120,5 +124,9 @@ func run() error {
 	if os.Args[1] != "serve" {
 		return errors.New("unknown command")
 	}
-	return bridge.Serve(abs, *listen, nil)
+	var registerApp func(*mcp.Server)
+	if app {
+		registerApp = mcpapp.Register
+	}
+	return bridge.Serve(abs, *listen, registerApp)
 }

@@ -1,0 +1,33 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Bridge management</title>
+<style>body{font:16px system-ui;color:CanvasText;background:Canvas;margin:1rem}label{display:block;margin:.8rem 0}select,textarea,input,button{font:inherit}textarea,pre{width:100%;box-sizing:border-box}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
+<h1>Bridge management</h1><label>Operation <select id="op"></select></label>
+<div id="settings"></div><label>Arguments (JSON)<textarea id="args" rows="7">{}</textarea></label><button id="run" disabled>Run</button><pre id="result" aria-live="polite"></pre>
+<script>
+const operations={
+ bridge_list_sources:{},bridge_create_source:{source:{id:"qa",type:"package"},package_path:"",dry_run:true},
+ bridge_update_source:{source_id:"qa",revision:1,patch:{}},bridge_delete_source:{id:"qa",revision:1},
+ bridge_get_status:{source_id:"qa"},bridge_save_tool:{name:"summary",description:"Get five failure IDs",input_schema:{type:"object"},runtime:"python",uses:["qa/failure_summary"],script:"def run(args, ctx):\n    rows = ctx.call_tool('qa/failure_summary', {'limit': 5})['rows']\n    return [r['id'] for r in rows]"},
+ bridge_delete_tool:{id:"summary",revision:1},bridge_save_destination:{destination:{id:"review",url:"",grants:[]},revision:0},
+ bridge_delete_destination:{id:"review",revision:1},search_event_types:{query:""},save_trigger:{trigger_id:"qa-review",when:{type:"event",source_id:"qa",event_name:"test_run.failed"}},list_triggers:{},get_trigger:{trigger_id:"qa-review"},delete_trigger:{trigger_id:"qa-review",revision:1},bridge_get_tool:{tool_id:"bridge.builtin/summary"}
+};
+const el=id=>document.getElementById(id),pending=new Map();let seq=0,origin="*";
+function rpc(method,params){const id=++seq;return new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});parent.postMessage({jsonrpc:"2.0",id,method,params},origin)})}
+window.addEventListener("message",e=>{if(e.source!==parent||e.data?.jsonrpc!=="2.0"||(origin!=="*"&&e.origin!==origin))return;const call=pending.get(e.data.id);if(!call)return;pending.delete(e.data.id);if(e.origin!=="null")origin=e.origin;e.data.error?call.reject(Error(e.data.error.message)):call.resolve(e.data.result)});
+for(const key of Object.keys(operations))el("op").add(new Option(key,key));el("op").onchange=()=>el("args").value=JSON.stringify(operations[el("op").value],null,2);
+async function call(name,args){const r=await rpc("tools/call",{name,arguments:args});if(r.isError)throw Error(r.content?.[0]?.text||"Operation failed");return r.structuredContent??r.content}
+function settingsForm(args,data,creating=false){
+ const box=el("settings");box.replaceChildren();const fields=[];let server;
+ if(creating){server=document.createElement("input");server.placeholder="Packaged server name";server.value=data.servers?.length===1?data.servers[0]:"";server.placeholder=data.servers?.join(" / ")||"Optional server";box.append(server)}
+ for(const [key,def] of Object.entries(data.schema??{})){const label=document.createElement("label"),field=document.createElement(def.multiple?"textarea":"input");label.textContent=def.title||key;if(!def.multiple)field.type=def.type==="boolean"?"checkbox":def.type==="number"?"number":"text";field.required=!!def.required;
+ if(def.sensitive){field.placeholder="Provisioned credential name";}else if(field.type==="checkbox"){field.checked=data.values?.[key]??def.default??false}else{const v=data.values?.[key]??def.default??"";field.value=Array.isArray(v)?v.join("\n"):String(v)}
+ label.append(" ",field);box.append(label);fields.push([key,field,def])}
+ if(!fields.length&&!creating)return;const save=document.createElement("button");save.textContent="Save settings";box.append(save);
+ save.onclick=async()=>{try{const values={};for(const [key,f,def] of fields){if(def.sensitive){if(f.value)values[key]={credential:f.value}}else if(def.multiple){values[key]=f.value.split("\n").filter(Boolean)}else values[key]=f.type==="checkbox"?f.checked:f.type==="number"?Number(f.value):f.value}
+ let id=args.source_id;
+ if(creating){id=args.source.id;const result=await call("bridge_create_source",{...args,dry_run:false,source:{...args.source,server:server.value,settings:values}});if(result.state==="preview")throw Error("Complete required settings: "+result.missing.join(", "))}
+ else {await call("bridge_update_source",{source_id:id,revision:data.revision,patch:{settings:values}})}
+ const next=await call("bridge_get_status",{source_id:id});settingsForm({source_id:id},next);el("result").textContent="Settings saved"}catch(e){el("result").textContent=e.message}}
+}
+el("run").onclick=async()=>{try{el("settings").replaceChildren();const name=el("op").value,args=JSON.parse(el("args").value);const out=await call(name,args);el("result").textContent=JSON.stringify(out,null,2);if(name==="bridge_get_status"&&out.schema)settingsForm(args,out);if(name==="bridge_create_source"&&out.state==="preview"&&args.package_path)settingsForm(args,out,true)}catch(e){el("result").textContent=e.message}};
+rpc("ui/initialize",{appInfo:{name:"mcp-bridge",version:"0.1.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(()=>{parent.postMessage({jsonrpc:"2.0",method:"ui/notifications/initialized"},origin);el("run").disabled=false}).catch(e=>el("result").textContent=e.message)
+</script></html>
