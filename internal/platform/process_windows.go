@@ -42,7 +42,13 @@ func SandboxCommand(ctx context.Context, python string, args ...string) (*exec.C
 	cmd, err := supervisedCommand(ctx, "python", image, args)
 	if err == nil {
 		cmd.Dir = filepath.Dir(image)
-		cmd.Env = []string{} // Go includes the OS-required SystemRoot.
+		// Windows resolves these user folders while creating the AppContainer.
+		cmd.Env = []string{}
+		for _, key := range []string{"SystemRoot", "SystemDrive", "WINDIR", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
+			if value, ok := os.LookupEnv(key); ok {
+				cmd.Env = append(cmd.Env, key+"="+value)
+			}
+		}
 	}
 	return cmd, err
 }

@@ -51,8 +51,7 @@ jobs:
             unzip -q mcp-bridge-windows-amd64.zip
           fi
       - run: python tests/native_platform.py dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }} --late-python "${{ steps.late-python.outputs.python-path }}"
-      - if: runner.os == 'macOS'
-        run: python tests/native_install.py dist/mcp-bridge-${{ matrix.target }} --late-python "${{ steps.late-python.outputs.python-path }}"
+      - run: python tests/native_install.py dist/mcp-bridge-${{ matrix.target }} --late-python "${{ steps.late-python.outputs.python-path }}"
       - uses: actions/upload-artifact@v4
         with:
           name: bridge-${{ matrix.target }}
