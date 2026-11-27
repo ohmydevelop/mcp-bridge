@@ -41,15 +41,16 @@ jobs:
       - run: go test ./...
       - run: python deploy/package.py --target ${{ matrix.target }}
       - name: Extract and check package
-        shell: bash
+        shell: python {0}
         run: |
-          cd dist
-          shasum -a 256 -c SHA256SUMS
-          if [[ "${{ runner.os }}" == macOS ]]; then
-            tar -xzf mcp-bridge-darwin-arm64.tar.gz
-          else
-            unzip -q mcp-bridge-windows-amd64.zip
-          fi
+          from pathlib import Path
+          import hashlib, shutil
+          dest = Path("dist")
+          for line in (dest / "SHA256SUMS").read_text().splitlines():
+              expected, name = line.split(None, 1)
+              archive = dest / name
+              assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected, name
+              shutil.unpack_archive(archive, dest)
       - run: python tests/native_platform.py dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }} --late-python "${{ steps.late-python.outputs.python-path }}"
       - run: python tests/native_install.py dist/mcp-bridge-${{ matrix.target }} --late-python "${{ steps.late-python.outputs.python-path }}"
       - uses: actions/upload-artifact@v4
