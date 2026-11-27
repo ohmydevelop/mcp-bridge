@@ -55,7 +55,7 @@ type view struct {
 type Bridge struct {
 	registerApp   func(*mcp.Server)
 	profiles      map[string]Profile
-	presets       map[string]cliPreset
+	presets       map[string]Destination
 	terminals     sync.Map
 	verified      sync.Map
 	activeStreams sync.Map

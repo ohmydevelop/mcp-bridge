@@ -1,4 +1,4 @@
-// Package pyrunner runs Python bindings in an isolated Linux process.
+// Package pyrunner runs Python bindings in an isolated native process.
 package pyrunner
 
 import (
@@ -8,9 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
-	"syscall"
+	"strings"
 	"time"
 )
 
@@ -24,17 +22,23 @@ const limit = 1 << 20
 func Run(parent context.Context, script string, args map[string]any, check bool, call Call) (any, error) {
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	argv := []string{"--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL", "--clearenv", "--ro-bind", "/usr/lib", "/usr/lib", "--ro-bind", "/usr/bin/python3", "/usr/bin/python3"}
-	for _, dir := range []string{"/lib", "/lib64"} {
-		if _, e := os.Stat(dir); e == nil {
-			argv = append(argv, "--ro-bind", dir, dir)
-		}
+	py, err := discover(ctx)
+	if err != nil {
+		return nil, err
 	}
-	argv = append(argv, "--size", "8388608", "--tmpfs", "/tmp", "--remount-ro", "/", "--chdir", "/tmp", "--", "/usr/bin/python3", "-ISB", "-c", worker)
-	cmd := exec.CommandContext(ctx, "bwrap", argv...)
-	cmd.Env = []string{}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	return run(ctx, py, cancel, script, args, check, call)
+}
+
+func run(ctx context.Context, py interpreter, cancel context.CancelFunc, script string, args map[string]any, check bool, call Call) (any, error) {
+	cmd, err := command(ctx, py)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	var diagnostic startupDiagnostic
+	cmd.Stderr = &diagnostic
 	in, e := cmd.StdinPipe()
 	if e != nil {
 		return nil, e
@@ -44,9 +48,19 @@ func Run(parent context.Context, script string, args map[string]any, check bool,
 		return nil, e
 	}
 	if e = cmd.Start(); e != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("isolated Python unavailable: %w", e)
 	}
-	defer func() { cancel(); in.Close(); cmd.Wait() }()
+	waited := false
+	defer func() {
+		cancel()
+		in.Close()
+		if !waited {
+			cmd.Wait()
+		}
+	}()
 	enc := json.NewEncoder(in)
 	if e = enc.Encode(map[string]any{"script": script, "args": args, "check": check}); e != nil {
 		return nil, e
@@ -95,5 +109,29 @@ func Run(parent context.Context, script string, args map[string]any, check bool,
 	if scanner.Err() != nil {
 		return nil, errors.New("Python output exceeds limit")
 	}
-	return nil, errors.New("isolated Python unavailable or worker exited; check bubblewrap, namespaces, Python and libseccomp")
+	in.Close()
+	waitErr := cmd.Wait()
+	waited = true
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if text := strings.TrimSpace(string(diagnostic.data[:diagnostic.n])); text != "" {
+		return nil, fmt.Errorf("isolated Python worker (%s): %s", py.Executable, text)
+	}
+	if waitErr != nil {
+		return nil, fmt.Errorf("isolated Python worker (%s): %w", py.Executable, waitErr)
+	}
+	return nil, fmt.Errorf("isolated Python worker exited without a response (%s)", py.Executable)
+}
+
+// The supervisor may fail before it can emit a protocol frame. Keep a bounded
+// prefix; Wait joins os/exec's writer before the diagnostic is consumed.
+type startupDiagnostic struct {
+	data [1024]byte
+	n    int
+}
+
+func (d *startupDiagnostic) Write(p []byte) (int, error) {
+	d.n += copy(d.data[d.n:], p)
+	return len(p), nil
 }

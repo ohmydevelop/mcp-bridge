@@ -3,6 +3,7 @@ module newmcp/mcp-bridge
 go 1.26.0
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/creack/pty v1.1.24
 	github.com/dlclark/regexp2 v1.11.5
 	github.com/google/uuid v1.6.0

@@ -8,28 +8,36 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
+	"sync"
 	"time"
 	"unicode"
 
+	"newmcp/mcp-bridge/internal/platform"
 	"newmcp/mcp-bridge/internal/storage"
 	"newmcp/mcp-bridge/internal/terminal"
 )
 
 type terminalBinding struct{}
-type cliPreset struct {
-	ID      string   `json:"id"`
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
-	Cwd     string   `json:"cwd"`
-	Format  string   `json:"input_format"`
-	Grants  []string `json:"grants,omitempty"`
-}
+type localConnectionKey struct{}
 
+func (d Destination) validateCLI() error {
+	if !filepath.IsAbs(d.Command) || !filepath.IsAbs(d.Cwd) || (d.Format != "json" && d.Format != "prompt") {
+		return fmt.Errorf("invalid CLI configuration %q: require absolute command and cwd and input_format json or prompt", d.ID)
+	}
+	if _, err := exec.LookPath(d.Command); err != nil {
+		return err
+	}
+	dir, err := os.Stat(d.Cwd)
+	if err != nil || !dir.IsDir() {
+		return fmt.Errorf("invalid CLI cwd for %s", d.ID)
+	}
+	return nil
+}
 func (d Destination) kind() string {
 	if d.Type == "" {
 		return "webhook"
@@ -37,7 +45,7 @@ func (d Destination) kind() string {
 	return d.Type
 }
 func (b *Bridge) loadLocalDestinations() error {
-	var list []cliPreset
+	var list []Destination
 	raw, err := os.ReadFile(filepath.Join(b.dir, "cli-destinations.json"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -47,7 +55,7 @@ func (b *Bridge) loadLocalDestinations() error {
 			return err
 		}
 	}
-	b.presets = map[string]cliPreset{}
+	b.presets = map[string]Destination{}
 	tx, err := b.store.DB.Begin()
 	if err != nil {
 		return err
@@ -62,18 +70,18 @@ func (b *Bridge) loadLocalDestinations() error {
 		existing[d.ID] = d
 	}
 	for _, c := range list {
-		if !identifier.MatchString(c.ID) || !filepath.IsAbs(c.Command) || !filepath.IsAbs(c.Cwd) || (c.Format != "json" && c.Format != "prompt") {
+		if !identifier.MatchString(c.ID) {
 			return fmt.Errorf("invalid cli preset %q", c.ID)
 		}
 		if _, ok := b.presets[c.ID]; ok {
 			return fmt.Errorf("duplicate preset %s", c.ID)
 		}
-		if _, err = exec.LookPath(c.Command); err != nil {
-			return err
+		b.presets[c.ID] = c
+		if existing[c.ID].kind() == "cli_process" && existing[c.ID].Command != "" {
+			continue
 		}
-		dir, err := os.Stat(c.Cwd)
-		if err != nil || !dir.IsDir() {
-			return fmt.Errorf("invalid preset cwd %s", c.ID)
+		if err := c.validateCLI(); err != nil {
+			return err
 		}
 		d := Destination{ID: c.ID, Type: "cli_process", Owner: localIdentity, Grants: c.Grants}
 		prev, ok := existing[c.ID]
@@ -91,7 +99,6 @@ func (b *Bridge) loadLocalDestinations() error {
 				return err
 			}
 		}
-		b.presets[c.ID] = c
 	}
 	// Once external submission starts a restart cannot establish its outcome.
 	if _, err = tx.Exec("UPDATE deliveries SET status='unknown',error='interrupted during submission' WHERE status='submitting'"); err != nil {
@@ -116,7 +123,8 @@ func (b *Bridge) destinationStatus(p Principal, revisions map[string]int) ([]Obj
 			row["online"] = b.terminalOnline(d.ID)
 			delete(revisions, d.ID)
 		case "cli_process":
-			_, row["online"] = b.presets[d.ID]
+			_, fromFile := b.presets[d.ID]
+			row["online"] = d.Command != "" || fromFile
 			delete(revisions, d.ID)
 		default:
 			row["online"] = nil
@@ -131,8 +139,9 @@ func (b *Bridge) terminalOnline(id string) bool {
 }
 
 type localJob struct {
-	ID, Flow string
-	Payload  json.RawMessage
+	ID, Flow    string
+	Payload     json.RawMessage
+	Destination Destination
 }
 
 func (b *Bridge) nextLocal(dest, kind string) (localJob, error) {
@@ -157,6 +166,7 @@ func (b *Bridge) nextLocal(dest, kind string) (localJob, error) {
 		}
 		return j, err
 	}
+	j.Destination = d
 	err = b.store.Decode("delivery", j.ID, raw, &j.Payload)
 	return j, err
 }
@@ -277,9 +287,42 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (b *Bridge) processCLI(ctx context.Context, c cliPreset) error {
+func (b *Bridge) dispatchCLI(ctx context.Context, busy *sync.Map, jobs *sync.WaitGroup) error {
+	rows, err := b.store.DB.QueryContext(ctx, `SELECT DISTINCT d.destination FROM deliveries d
+        JOIN local_deliveries l ON l.id=d.id
+        WHERE d.status='pending' AND d.next<=unixepoch() AND l.kind='cli_process'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		if _, running := busy.LoadOrStore(id, true); running {
+			continue
+		}
+		jobs.Go(func() {
+			defer busy.Delete(id)
+			if err := b.processCLI(ctx, id); err != nil && !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
+				log.Print("cli delivery: ", err)
+			}
+		})
+	}
+	return rows.Err()
+}
+
+func (b *Bridge) processCLI(ctx context.Context, id string) error {
 	b.modify.Lock()
-	j, err := b.nextLocal(c.ID, "cli_process")
+	j, err := b.nextLocal(id, "cli_process")
+	c := j.Destination
+	if err == nil && c.Command == "" {
+		var ok bool
+		if c, ok = b.presets[id]; !ok {
+			err = sql.ErrNoRows
+		}
+	}
 	if err == nil {
 		err = b.claim(j.ID)
 	}
@@ -296,24 +339,24 @@ func (b *Bridge) processCLI(ctx context.Context, c cliPreset) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Command, c.Args...)
-	cmd.Dir = c.Cwd
-	cmd.Stdin = strings.NewReader(input + "\n")
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "LANG=C.UTF-8"}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = time.Second
+	cmd, err := platform.CLICommand(ctx, c.Command, c.Args...)
 	var stdout, stderr boundedBuffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err = cmd.Run()
+	if err == nil {
+		cmd.Dir = c.Cwd
+		cmd.Stdin = strings.NewReader(input + "\n")
+		cmd.Env = platform.ChildEnv(true)
+		cmd.WaitDelay = time.Second
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+	}
 	state := "completed"
 	reason := ""
 	if err != nil {
 		state = "failed"
 		reason = err.Error()
 	}
-	if errors.Is(ctx.Err(), context.Canceled) && cmd.Process != nil {
+	if errors.Is(ctx.Err(), context.Canceled) && cmd != nil && cmd.Process != nil {
 		state = "unknown"
 		reason = "daemon stopped during execution"
 	} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -321,7 +364,7 @@ func (b *Bridge) processCLI(ctx context.Context, c cliPreset) error {
 		reason = "execution timed out"
 	}
 	result := Object{"stdout": stdout.buf.String(), "stderr": stderr.buf.String()}
-	if cmd.ProcessState != nil {
+	if cmd != nil && cmd.ProcessState != nil {
 		result["exit_code"] = cmd.ProcessState.ExitCode()
 	}
 	blob, err := b.store.Seal("delivery-result", j.ID, result)

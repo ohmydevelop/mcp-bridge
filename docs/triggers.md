@@ -1,6 +1,6 @@
 # Triggers
 
-A trigger has one event or schedule, an optional versioned Python handler, and a webhook, terminal session, or CLI process destination. Discover events with `search_event_types` and destinations with `bridge_get_status`. Configure a webhook destination with `bridge_save_destination`. A missing or ambiguous destination returns candidate IDs and does not save the trigger.
+A trigger has one event or schedule, an optional versioned Python handler, and a webhook, terminal session, or CLI process destination. Discover events with `search_event_types` and destinations with `bridge_get_status`. Configure a webhook or CLI process destination with `bridge_save_destination`. A missing or ambiguous destination returns candidate IDs and does not save the trigger.
 
 Save a scheduled trigger with `save_trigger` after saving the handler with `bridge_save_tool`. Supply the returned version, including for a rollback.
 
@@ -70,17 +70,38 @@ Use `bridge_get_status` to see destination IDs, types and availability. In an MC
 
 The default inbox announces a pending event. Press Ctrl+] to preview it and press Ctrl+] again at an empty agent prompt to submit. In auto mode the launcher pastes the prompt and presses Enter as soon as it obtains the delivery. Use auto with a dedicated CLI at a prompt that accepts text and Enter. The launcher owns the child PTY and propagates terminal size and exit status. In Linux canonical input mode a prompt over 4095 bytes records `failed` before writing. Terminal submission records `submitted`; to verify that a model processed the event, inspect its actual answer. Pending deliveries survive a daemon restart and stay bound to their original destination. An interrupted submission with an uncertain outcome records `unknown` and does not replay automatically.
 
-For a fresh noninteractive process per delivery, create `~/.mcp-bridge/cli-destinations.json` (or use your `-data` directory) and restart the daemon. Example for inspecting the exact input:
+For a fresh noninteractive process per delivery, call `bridge_save_destination` over local stdio:
 
 ```json
-[{"id":"echo-event","command":"/usr/bin/cat","args":[],"cwd":"/tmp","input_format":"json"}]
+{"destination":{"type":"cli_process","id":"echo-event","command":"/usr/bin/cat","args":[],"cwd":"/tmp","input_format":"json"},"revision":0}
 ```
+
+Use revision 0 to create. To replace the configuration, pass the destination's current revision from `bridge_get_status` and the full definition. The next claimed delivery uses the saved configuration immediately, and the configuration survives daemon restarts. The command and working directory must be absolute paths.
+
+Existing `cli-destinations.json` presets still load at startup. Saving the same ID with its current revision gives the saved configuration precedence over the file. To retire a file-defined ID, remove its file entry and restart before calling `bridge_delete_destination`. Terminal sessions are registered by their launcher.
 
 Select `echo-event` as the trigger's destination. Each preset runs deliveries serially using its fixed executable and arguments. Bridge writes one JSON notification or rendered prompt (set `input_format` to `prompt`) to stdin and closes it. Event fields are never interpolated into command arguments. Configure a noninteractive agent command in the preset for actual model processing. Each run has a five-minute deadline. Look up its run ID with `get_trigger`, then pass that ID as `run_id` to inspect `delivery_result.exit_code` when available and the first 8192 bytes from each output stream. A nonzero exit or timeout records `failed`.
 
-Previously saved webhook destinations, trigger references, and pending webhook deliveries remain valid. Update callers of `bridge_save_webhook` and `bridge_delete_webhook` to `bridge_save_destination` and `bridge_delete_destination`. The webhook payload is unchanged; the optional destination `type` defaults to `webhook`. Terminal registrations and local executable presets are managed by their host.
+Previously saved webhook destinations, trigger references, and pending webhook deliveries remain valid. Update callers of `bridge_save_webhook` and `bridge_delete_webhook` to `bridge_save_destination` and `bridge_delete_destination`. The webhook payload is unchanged; the optional destination `type` defaults to `webhook`.
 
-Run `make check` for the offline acceptance tests. With authenticated Codex and OpenCode on PATH and a working model connection, run the live Bash/PTY test from the repository root:
+## Change a CLI target and verify one delivery
+
+For an existing schedule named `daily-report` that uses the CLI destination `report`, make these four MCP calls over local stdio.
+
+| Step | Tool | Arguments |
+| --- | --- | --- |
+| Read the effective command, arguments and revision | `bridge_get_status` | `{"destination_id":"report"}` |
+| Change the receiving thread | `bridge_save_destination` | `{"destination_id":"report","revision":3,"patch":{"args":["/opt/report/send.py","--thread","B"]}}` |
+| Send once now | `run_trigger_now` | `{"trigger_id":"daily-report","request_id":"report-to-b-001"}` |
+| Verify that send | `get_trigger` | `{"trigger_id":"daily-report","view":"latest","run_id":"<returned run_id>","wait_ms":10000}` |
+
+Use the revision and full argument list from the first response, changing only the intended argument. An array in a patch replaces the entire array. A stale revision returns a conflict. A destination edit takes effect for the next claimed delivery of every trigger using that destination.
+
+An immediate run uses the enabled trigger's handler and destination and preserves its normal schedule or event cursor. For an event trigger, supply the ID of a stored event visible to the caller that matches the trigger. Set `dry_run` to `true` to inspect the input without executing the handler or sending. Reuse a request ID to retry the same send on the same trigger instance. Use a fresh request ID for a new send.
+
+Omit `run_id` from the latest view to inspect the most recent run. An empty history returns `never_run`. A wait of up to 30000 ms returns the current state when it expires. A positive wait selects the compact view automatically. To continue waiting, pass the same run ID. A successful CLI process records `completed` and its exit code. A terminal records `submitted` when it submits the prompt, and a webhook records `accepted` when the receiver acknowledges it.
+
+Run `make check` for the offline acceptance tests. To measure a real Codex turn against temporary CLI receivers A and B, run `python3 tests/trigger_intent.py --codex codex` after building Bridge. With authenticated Codex and OpenCode on PATH and a working model connection, run the live Bash/PTY test from the repository root:
 
 ```sh
 make build

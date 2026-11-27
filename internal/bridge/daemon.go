@@ -13,39 +13,26 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"newmcp/mcp-bridge/internal/terminal"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"golang.org/x/sys/unix"
+	"newmcp/mcp-bridge/internal/localipc"
+	"newmcp/mcp-bridge/internal/pyrunner"
+	"newmcp/mcp-bridge/internal/terminal"
 )
 
 // Serve runs the bridge daemon using the absolute state directory.
 func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
-	var e error
-	socket := filepath.Join(abs, "bridge.sock")
-	syscall.Umask(0077)
-	if e = os.MkdirAll(abs, 0700); e != nil {
-		return e
-	}
-	info, e := os.Stat(abs)
-	if e != nil || info.Mode().Perm()&0077 != 0 {
-		return errors.New("state directory must be private (0700)")
-	}
-	lock, e := os.OpenFile(filepath.Join(abs, "bridge.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, e := localipc.Lock(abs)
 	if e != nil {
 		return e
 	}
 	defer lock.Close()
-	if e = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); e != nil {
-		return errors.New("state directory already in use")
-	}
 	key, e := hex.DecodeString(os.Getenv("BRIDGE_MASTER_KEY"))
 	if e != nil || len(key) != 32 {
 		return errors.New("BRIDGE_MASTER_KEY requires 64 hex characters")
@@ -99,10 +86,7 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 			log.Printf("source %s could not initialize", s.ID)
 		}
 	}
-	if e = os.Remove(socket); e != nil && !errors.Is(e, os.ErrNotExist) {
-		return e
-	}
-	ln, e := net.Listen("unix", socket)
+	ln, e := localipc.Listen(abs)
 	if e != nil {
 		return e
 	}
@@ -120,22 +104,6 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 			})
 		}
 	})
-	for _, preset := range b.presets {
-		jobs.Go(func() {
-			t := time.NewTicker(250 * time.Millisecond)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					if err := b.processCLI(ctx, preset); err != nil && !errors.Is(err, sql.ErrNoRows) && ctx.Err() == nil {
-						log.Print("cli delivery: ", err)
-					}
-				}
-			}
-		})
-	}
 	handlers := map[string]http.Handler{}
 	for name := range tokens {
 		p := Principal{name}
@@ -168,6 +136,21 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 		fmt.Fprintln(w, "ok")
 	})
 	srv := http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 32768}
+	jobs.Go(func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		var busy sync.Map
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := b.dispatchCLI(ctx, &busy, &jobs); err != nil && ctx.Err() == nil {
+					log.Print("cli queue: ", err)
+				}
+			}
+		}
+	})
 	jobs.Go(func() {
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
@@ -276,7 +259,25 @@ func (b *Bridge) localConnection(ctx context.Context, c net.Conn) {
 		return
 	}
 	switch first[0] {
+	case 'D':
+		r.ReadByte()
+		result := localHealth{}
+		if err := b.store.DB.PingContext(ctx); err != nil {
+			result.Error = err.Error()
+		} else {
+			result.Bridge = true
+			python, err := pyrunner.Probe(ctx)
+			result.Python = python
+			if err != nil {
+				result.Error = err.Error()
+			}
+		}
+		json.NewEncoder(c).Encode(result)
+		return
 	case 'T':
+		if !terminal.Supported {
+			return
+		}
 		r.ReadByte()
 		var req terminal.Request
 		if err = json.NewDecoder(io.LimitReader(r, 2048)).Decode(&req); err != nil {
@@ -289,6 +290,9 @@ func (b *Bridge) localConnection(ctx context.Context, c net.Conn) {
 		json.NewEncoder(c).Encode(reply)
 		return
 	case 'B':
+		if !terminal.Supported {
+			return
+		}
 		r.ReadByte()
 		line, err := r.ReadSlice('\n')
 		if err != nil || len(line) != 65 {
@@ -300,6 +304,7 @@ func (b *Bridge) localConnection(ctx context.Context, c net.Conn) {
 		}
 		ctx = context.WithValue(ctx, terminalBinding{}, id)
 	}
+	ctx = context.WithValue(ctx, localConnectionKey{}, true)
 	reader := struct {
 		io.Reader
 		io.Closer

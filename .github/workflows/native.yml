@@ -1,0 +1,83 @@
+name: Native platform acceptance
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+    inputs:
+      windows11:
+        description: Run the release gate on a Windows 11 x64 runner under your control
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: darwin-arm64
+            binary: mcp-bridge
+          - os: windows-2025
+            target: windows-amd64
+            binary: mcp-bridge.exe
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        id: late-python
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: go test ./...
+      - run: python deploy/package.py --target ${{ matrix.target }}
+      - name: Extract and check package
+        shell: bash
+        run: |
+          cd dist
+          shasum -a 256 -c SHA256SUMS
+          if [[ "${{ runner.os }}" == macOS ]]; then
+            tar -xzf mcp-bridge-darwin-arm64.tar.gz
+          else
+            unzip -q mcp-bridge-windows-amd64.zip
+          fi
+      - run: python tests/native_platform.py dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }} --late-python "${{ steps.late-python.outputs.python-path }}"
+      - if: runner.os == 'macOS'
+        run: python tests/native_install.py dist/mcp-bridge-${{ matrix.target }} --late-python "${{ steps.late-python.outputs.python-path }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-${{ matrix.target }}
+          path: |
+            dist/SHA256SUMS
+            dist/*.tar.gz
+            dist/*.zip
+
+  windows11:
+    if: github.event_name == 'workflow_dispatch' && inputs.windows11
+    runs-on: [self-hosted, windows, x64, windows-11]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        id: late-python
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python deploy/package.py --target windows-amd64
+      - run: Expand-Archive -Force dist/mcp-bridge-windows-amd64.zip .native-release
+      - run: python tests/native_platform.py .native-release/mcp-bridge-windows-amd64/mcp-bridge.exe --late-python "${{ steps.late-python.outputs.python-path }}"
+      - run: python tests/native_install.py .native-release/mcp-bridge-windows-amd64 --late-python "${{ steps.late-python.outputs.python-path }}"

@@ -18,7 +18,7 @@
 | 身份 | 公开入口 |
 |---|---|
 | 所有 Agent（业务操作） | `search_tools`、`call_tool`、`bridge_execute_script` |
-| 所有 Agent（Skill 与事件） | `search_skills`、`get_skill`、`search_event_types`、`save_trigger`、`list_triggers`、`get_trigger`、`delete_trigger` |
+| 所有 Agent（Skill 与事件） | `search_skills`、`get_skill`、`search_event_types`、`save_trigger`、`run_trigger_now`、`list_triggers`、`get_trigger`、`delete_trigger` |
 | 所有 Agent（管理操作） | `bridge_create_source`、`bridge_update_source`、`bridge_delete_source`、`bridge_get_tool`、`bridge_save_tool`、`bridge_delete_tool`、`bridge_save_destination`、`bridge_delete_destination`、`bridge_get_status`、`bridge_list_sources`；以 `serve -app` 启用 `bridge_open_app` |
 | 生产者（1） | `publish_event`。凭证绑定一个来源，仅可发送该来源声明的事件 |
 

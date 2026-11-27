@@ -47,7 +47,7 @@ func (b *Bridge) sourceTools(v *view) {
 		if e = json.Unmarshal(base, &fields); e != nil {
 			return nil, e
 		}
-		mergeSourcePatch(fields, in.Patch)
+		mergePatch(fields, in.Patch)
 		raw, e := json.Marshal(fields)
 		if e != nil {
 			return nil, e
@@ -66,7 +66,7 @@ func (b *Bridge) sourceTools(v *view) {
 }
 
 // Object members merge recursively. Null removes a member and arrays replace in full.
-func mergeSourcePatch(fields Object, patch Object) {
+func mergePatch(fields Object, patch Object) {
 	for key, value := range patch {
 		if value == nil {
 			delete(fields, key)
@@ -77,7 +77,7 @@ func mergeSourcePatch(fields Object, patch Object) {
 			if existing == nil {
 				existing = Object{}
 			}
-			mergeSourcePatch(existing, child)
+			mergePatch(existing, child)
 			fields[key] = existing
 		} else {
 			fields[key] = value

@@ -8,7 +8,7 @@ const operations={
  bridge_update_source:{source_id:"qa",revision:1,patch:{}},bridge_delete_source:{id:"qa",revision:1},
  bridge_get_status:{source_id:"qa"},bridge_save_tool:{name:"summary",description:"Get five failure IDs",input_schema:{type:"object"},runtime:"python",uses:["qa/failure_summary"],script:"def run(args, ctx):\n    rows = ctx.call_tool('qa/failure_summary', {'limit': 5})['rows']\n    return [r['id'] for r in rows]"},
  bridge_delete_tool:{id:"summary",revision:1},bridge_save_destination:{destination:{id:"review",url:"",grants:[]},revision:0},
- bridge_delete_destination:{id:"review",revision:1},search_event_types:{query:""},save_trigger:{trigger_id:"qa-review",when:{type:"event",source_id:"qa",event_name:"test_run.failed"}},list_triggers:{},get_trigger:{trigger_id:"qa-review"},delete_trigger:{trigger_id:"qa-review",revision:1},bridge_get_tool:{tool_id:"bridge.builtin/summary"}
+ bridge_delete_destination:{id:"review",revision:1},search_event_types:{query:""},save_trigger:{trigger_id:"qa-review",when:{type:"event",source_id:"qa",event_name:"test_run.failed"}},run_trigger_now:{trigger_id:"qa-review",event_id:"",dry_run:true},list_triggers:{},get_trigger:{trigger_id:"qa-review"},delete_trigger:{trigger_id:"qa-review",revision:1},bridge_get_tool:{tool_id:"bridge.builtin/summary"}
 };
 const el=id=>document.getElementById(id),pending=new Map();let seq=0,origin="*";
 function rpc(method,params){const id=++seq;return new Promise((resolve,reject)=>{pending.set(id,{resolve,reject});parent.postMessage({jsonrpc:"2.0",id,method,params},origin)})}
@@ -29,5 +29,5 @@ function settingsForm(args,data,creating=false){
  const next=await call("bridge_get_status",{source_id:id});settingsForm({source_id:id},next);el("result").textContent="Settings saved"}catch(e){el("result").textContent=e.message}}
 }
 el("run").onclick=async()=>{try{el("settings").replaceChildren();const name=el("op").value,args=JSON.parse(el("args").value);const out=await call(name,args);el("result").textContent=JSON.stringify(out,null,2);if(name==="bridge_get_status"&&out.schema)settingsForm(args,out);if(name==="bridge_create_source"&&out.state==="preview"&&args.package_path)settingsForm(args,out,true)}catch(e){el("result").textContent=e.message}};
-rpc("ui/initialize",{appInfo:{name:"mcp-bridge",version:"0.1.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(()=>{parent.postMessage({jsonrpc:"2.0",method:"ui/notifications/initialized"},origin);el("run").disabled=false}).catch(e=>el("result").textContent=e.message)
+rpc("ui/initialize",{appInfo:{name:"mcp-bridge",version:"0.2.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(()=>{parent.postMessage({jsonrpc:"2.0",method:"ui/notifications/initialized"},origin);el("run").disabled=false}).catch(e=>el("result").textContent=e.message)
 </script></html>

@@ -26,7 +26,11 @@ type Destination struct {
 	Type        string   `json:"type,omitempty"`
 	Owner       string   `json:"owner,omitempty"`
 	ID          string   `json:"id"`
-	URL         string   `json:"url"`
+	URL         string   `json:"url,omitempty"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	Cwd         string   `json:"cwd,omitempty"`
+	Format      string   `json:"input_format,omitempty"`
 	Credential  string   `json:"credential,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Grants      []string `json:"grants,omitempty"`
@@ -281,40 +285,7 @@ func (b *Bridge) eventTools(v *view) {
 	p := v.user
 	s := v.server
 	tool(s, "search_event_types", "Find events to subscribe to, including the source, filters and delivery modes.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchEvents(ctx, p, q) })
-	tool(s, "bridge_save_destination", "Manage a webhook destination. Local terminals and CLI process presets are registered on the host. Use revision 0 to create or the current revision to replace its configuration.", func(_ context.Context, in struct {
-		Destination Destination `json:"destination"`
-		Revision    int         `json:"revision"`
-	}) (any, error) {
-		d := in.Destination
-		if d.Type == "" {
-			d.Type = "webhook"
-		}
-		if d.Type != "webhook" {
-			return nil, errors.New("only webhook destinations are MCP-managed")
-		}
-		if !identifier.MatchString(d.ID) || !permittedURL(d.URL) {
-			return nil, errors.New("invalid id or destination origin")
-		}
-		if d.Credential != "" {
-			if _, e := secretValue(d.Credential); e != nil {
-				return nil, e
-			}
-		}
-		b.modify.Lock()
-		defer b.modify.Unlock()
-		d.Owner = p.Name
-		if in.Revision > 0 {
-			var previous Destination
-			if _, err := b.store.Get("destination", d.ID, &previous); err != nil {
-				return nil, err
-			}
-			if previous.kind() != "webhook" {
-				return nil, errors.New("destination is host-managed")
-			}
-			d.Owner = previous.Owner
-		}
-		return Object{"revision": in.Revision + 1}, b.store.Put(p.Name, "destination", d.ID, d, in.Revision)
-	})
+	tool(s, "bridge_save_destination", "Create/replace with destination and revision, or patch with destination_id, patch and its current revision. Arrays replace in full. CLI configuration requires local stdio.", func(ctx context.Context, in destinationInput) (any, error) { return b.saveDestination(ctx, p, in) })
 	tool(s, "save_trigger", "Create an event or five-field cron trigger. Event when: source_id and event_name. Schedule when: five-field cron and IANA timezone. Optional handler takes run(args,ctx) with event or scheduled_at, returns {action:notify,data:...} or {action:skip,reason:...}. Pin its saved tool_id and revision. Omit revision or use 0 to create. Supply the current revision to update.", func(ctx context.Context, in flowInput) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
@@ -371,7 +342,7 @@ func (b *Bridge) eventTools(v *view) {
 					continue
 				}
 				if d.kind() == "cli_process" {
-					if _, ok := b.presets[d.ID]; !ok {
+					if _, ok := b.presets[d.ID]; !ok && d.Command == "" {
 						continue
 					}
 				}

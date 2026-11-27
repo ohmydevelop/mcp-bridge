@@ -20,9 +20,20 @@ type sourceRevision struct {
 }
 
 func (b *Bridge) management(v *view) {
-	tool(v.server, "bridge_get_status", "Discover webhook, terminal and CLI destinations and the current terminal ID. Inspect Bridge health, delivery backlog, published tool revisions or a source configuration.", func(ctx context.Context, in struct {
-		Source string `json:"source_id,omitempty"`
+	tool(v.server, "bridge_get_status", "Discover webhook, terminal and CLI destinations and the current terminal ID. Inspect Bridge health, delivery backlog, published tool revisions or a source configuration. Pass destination_id to read the effective definition and revision for editing.", func(ctx context.Context, in struct {
+		Source      string `json:"source_id,omitempty"`
+		Destination string `json:"destination_id,omitempty"`
 	}) (any, error) {
+		if in.Destination != "" {
+			if in.Source != "" {
+				return nil, errors.New("select one source or destination")
+			}
+			d, rev, err := b.effectiveDestination(ctx, v.user, in.Destination)
+			if err != nil {
+				return nil, err
+			}
+			return Object{"destination": d, "revision": rev}, nil
+		}
 		if in.Source != "" {
 			return b.sourceStatus(in.Source)
 		}

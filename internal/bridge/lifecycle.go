@@ -13,7 +13,7 @@ import (
 
 func (b *Bridge) lifecycleTools(v *view) {
 	p := v.user
-	tool(v.server, "bridge_delete_destination", "Delete a webhook destination by ID and current revision. It must have no dependent flows.", func(_ context.Context, in sourceRevision) (any, error) {
+	tool(v.server, "bridge_delete_destination", "Delete a webhook or locally managed CLI destination by ID and current revision. It must have no dependent flows.", func(ctx context.Context, in sourceRevision) (any, error) {
 		if in.Revision < 1 {
 			return nil, errors.New("existing revision required")
 		}
@@ -23,7 +23,14 @@ func (b *Bridge) lifecycleTools(v *view) {
 		if _, err := b.store.Get("destination", in.ID, &d); err != nil {
 			return nil, err
 		}
-		if d.kind() != "webhook" {
+		if d.kind() == "cli_process" {
+			if ctx.Value(localConnectionKey{}) != true {
+				return nil, errors.New("CLI configuration requires local stdio")
+			}
+			if _, present := b.presets[d.ID]; present {
+				return nil, errors.New("remove this ID from cli-destinations.json and restart before deleting it")
+			}
+		} else if d.kind() != "webhook" {
 			return nil, errors.New("destination is host-managed")
 		}
 		flows, e := storage.List[Flow](b.store, "flow")

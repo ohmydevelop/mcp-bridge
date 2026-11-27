@@ -1,3 +1,5 @@
+//go:build linux
+
 package terminal
 
 import (
@@ -20,6 +22,8 @@ import (
 	"golang.org/x/term"
 )
 
+const Supported = true
+
 // Child applications negotiate bracketed paste through terminal output.
 type pasteMode struct {
 	enabled atomic.Bool
@@ -38,7 +42,7 @@ func (m *pasteMode) Write(chunk []byte) (int, error) {
 }
 
 // Run keeps the master only for the lifetime of this child. Never fall back to a shell.
-func Run(socket, mode string, argv []string) error {
+func Run(dir, mode string, argv []string) error {
 	if len(argv) == 0 || (mode != "inbox" && mode != "auto") {
 		return errors.New("usage: mcp-bridge run [--delivery=inbox|auto] -- PROGRAM [ARG...]")
 	}
@@ -51,10 +55,10 @@ func Run(socket, mode string, argv []string) error {
 		return err
 	}
 	token := hex.EncodeToString(tokenBytes)
-	if _, err := request(socket, token, "register", ""); err != nil {
+	if _, err := request(dir, token, "register", ""); err != nil {
 		return err
 	}
-	defer request(socket, token, "close", "")
+	defer request(dir, token, "close", "")
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		return err
@@ -137,14 +141,14 @@ func Run(socket, mode string, argv []string) error {
 		case <-tick.C:
 		}
 		if ackID != "" {
-			if _, err = request(socket, token, ack, ackID); err != nil {
+			if _, err = request(dir, token, ack, ackID); err != nil {
 				continue
 			}
 			ackID = ""
 		}
-		r, e := request(socket, token, "peek", "")
+		r, e := request(dir, token, "peek", "")
 		if e != nil {
-			_, _ = request(socket, token, "register", "")
+			_, _ = request(dir, token, "register", "")
 			continue
 		}
 		if r.ID == "" {
@@ -167,7 +171,7 @@ func Run(socket, mode string, argv []string) error {
 			}
 		}
 
-		r, e = request(socket, token, "claim", r.ID)
+		r, e = request(dir, token, "claim", r.ID)
 		if e != nil || r.ID == "" {
 			continue
 		}
@@ -180,7 +184,7 @@ func Run(socket, mode string, argv []string) error {
 		ack = submit(master, input)
 		write.Unlock()
 		ackID = r.ID
-		if _, err = request(socket, token, ack, ackID); err == nil {
+		if _, err = request(dir, token, ack, ackID); err == nil {
 			ackID = ""
 		}
 		preview = ""

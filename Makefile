@@ -7,13 +7,11 @@ check: build
 	go test -race ./...
 	python3 tests/acceptance.py
 	python3 tests/local_destinations.py
+	python3 tests/trigger_intent.py
 	python3 tests/qa_execute_script.py
 	python3 tests/qa_trigger_replay.py
 release:
-	mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o dist/mcp-bridge-linux-amd64 .
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o dist/mcp-bridge-linux-arm64 .
-	cd dist && sha256sum mcp-bridge-linux-* > SHA256SUMS
+	python3 deploy/package.py
 
 .PHONY: check-app capture
 check-app: build

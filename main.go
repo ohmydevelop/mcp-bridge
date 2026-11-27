@@ -9,21 +9,28 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
+	_ "time/tzdata"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"newmcp/mcp-bridge/internal/bridge"
 	"newmcp/mcp-bridge/internal/cliadapter"
+	"newmcp/mcp-bridge/internal/localipc"
 	"newmcp/mcp-bridge/internal/mcpapp"
+	"newmcp/mcp-bridge/internal/platform"
+	"newmcp/mcp-bridge/internal/pyrunner"
 	"newmcp/mcp-bridge/internal/terminal"
 )
 
 func main() {
+	if handled, code := platform.ProcessHelper(); handled {
+		os.Exit(code)
+	}
 	if e := run(); e != nil {
 		var exit *exec.ExitError
 		if errors.As(e, &exit) {
@@ -39,12 +46,21 @@ func main() {
 }
 func run() error {
 	if len(os.Args) < 2 {
-		return errors.New("usage: mcp-bridge serve|stdio|cli|run [-data DIR] [-listen 127.0.0.1:8088]")
+		return errors.New("usage: mcp-bridge serve|stdio|cli|run|doctor|python-path [-data DIR] [-listen 127.0.0.1:8088]")
 	}
 	if os.Args[1] == "cli" {
 		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 		defer cancel()
 		return cliadapter.Serve(ctx, os.Args[2:])
+	}
+	if os.Args[1] == "python-path" {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		path, err := pyrunner.PythonPath(ctx)
+		if err == nil {
+			fmt.Println(path)
+		}
+		return err
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ContinueOnError)
 	const defaultDir = "~/.mcp-bridge"
@@ -76,12 +92,14 @@ func run() error {
 	if e != nil {
 		return e
 	}
-	socket := filepath.Join(abs, "bridge.sock")
+	if os.Args[1] == "doctor" {
+		return bridge.CheckLocal(abs, os.Stdout)
+	}
 	if os.Args[1] == "run" {
-		return terminal.Run(socket, delivery, fs.Args())
+		return terminal.Run(abs, delivery, fs.Args())
 	}
 	if os.Args[1] == "stdio" {
-		c, e := net.Dial("unix", socket)
+		c, e := localipc.Dial(abs)
 		if e != nil {
 			return e
 		}
@@ -109,7 +127,7 @@ func run() error {
 			return errors.New("invalid BRIDGE_TASK_SCOPE")
 		}
 		go func() {
-			defer c.(*net.UnixConn).CloseWrite()
+			defer c.CloseWrite()
 			if scope == "" {
 				io.Copy(c, os.Stdin)
 				return

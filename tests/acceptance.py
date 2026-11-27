@@ -1,5 +1,6 @@
 """Start the production binary, drive its MCP entry points, restart, and verify delivery."""
 import contextlib
+import errno
 import json
 import os
 from pathlib import Path
@@ -23,7 +24,7 @@ from qa_wire_trace import tool_request
 
 class Agent:
     def __init__(self, state, *stdio_options):
-        self.proc = subprocess.Popen([binary, "stdio", "-data", str(state), *stdio_options], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.proc = subprocess.Popen([binary, "stdio", "-data", str(state), *stdio_options], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8")
         self.seq = 0
         self.init = self.rpc("initialize", {"protocolVersion": version,"capabilities":{},"clientInfo":{"name":"fixture","version":"1"}})
         self.send({"method":"notifications/initialized"})
@@ -71,6 +72,44 @@ def eventually(fn):
         time.sleep(.1)
     raise AssertionError("deadline exceeded")
 
+def verify_independent_cli(client, producer, root):
+    """Keep a handler waiting on an upstream; a second event must still reach its CLI."""
+    snapshot = root / "snapshot.json"
+    os.mkfifo(snapshot)
+    client.call("bridge_create_source", source={"id": "gated", "type": "stdio",
+                "command": sys.executable, "args": [str(fixture / "server.py")],
+                "env": {"QA_BOT_REPLAY": str(root)}})
+    handler = client.call("bridge_save_tool", name="gated_read", uses=["gated/get_bot"],
+                description="Read a gated snapshot", input_schema={"type": "object"},
+                script='def run(args, ctx):\n    ctx.call_tool("gated/get_bot", {})\n    return {"action":"skip","reason":"finished"}')
+    client.call("bridge_save_destination", destination={"id": "receipt", "type": "cli_process",
+                "command": sys.executable, "cwd": str(root), "input_format": "json",
+                "args": ["-c", 'import sys; from pathlib import Path; Path("receipt").write_text(sys.stdin.read())']},
+                revision=0)
+    def when(case):
+        return {"type": "event", "source_id": "qa", "event_name": "test_run.failed", "filter": {"case": case}}
+    client.call("save_trigger", trigger_id="slow-read", when=when("slow"), handler=handler, destination_id="receipt")
+    client.call("save_trigger", trigger_id="independent", when=when("direct"), destination_id="receipt")
+    def publish(case):
+        producer.call("publish_event", event_id=case, event_name="test_run.failed", data={"case": case})
+    publish("slow")
+
+    def waiting_reader():
+        try:
+            return os.fdopen(os.open(snapshot, os.O_WRONLY | os.O_NONBLOCK), "w")
+        except OSError as err:
+            if err.errno != errno.ENXIO:
+                raise
+    with eventually(waiting_reader) as gate:
+        try:
+            publish("direct")
+            receipt = root / "receipt"
+            eventually(lambda: receipt.exists() and receipt.stat().st_size)
+            assert json.loads(receipt.read_text())["event"]["data"]["case"] == "direct"
+        finally:
+            gate.write("{}")
+
+
 def main():
     received=[]
     class Hook(BaseHTTPRequestHandler):
@@ -108,11 +147,15 @@ def main():
             assert a.init["protocolVersion"]==version
             normal,producer,basic=(HttpAgent(base,tokens[k]) for k in ("reader","producer","basic"))
             names=lambda client:{t["name"] for t in client.rpc("tools/list",{})["tools"]}
-            business={"bridge_execute_script","search_tools","call_tool","search_skills","get_skill","search_event_types","save_trigger","get_trigger","bridge_get_tool","list_triggers","delete_trigger"}
+            business={"bridge_execute_script","search_tools","call_tool","search_skills","get_skill","search_event_types","save_trigger","run_trigger_now","get_trigger","bridge_get_tool","list_triggers","delete_trigger"}
             mgmt={"bridge_create_source","bridge_update_source","bridge_delete_source","bridge_save_tool","bridge_delete_tool","bridge_save_destination","bridge_delete_destination","bridge_get_status","bridge_list_sources"}
             assert names(basic)==names(normal)==names(a)==business|mgmt
             assert names(producer)=={"publish_event"}
             assert "backlog" in basic.call("bridge_get_status")
+            remote_cli = basic.rpc("tools/call", {"name": "bridge_save_destination", "arguments": {
+                "destination": {"id": "remote-cli", "type": "cli_process", "command": "/usr/bin/cat",
+                                "cwd": "/tmp", "input_format": "json"}, "revision": 0}})
+            assert remote_cli["isError"] and "local stdio" in remote_cli["content"][0]["text"]
             try: producer.call("bridge_get_status")
             except (RuntimeError,urllib.error.HTTPError): pass
             else: raise AssertionError("producer unexpectedly received agent operations")
@@ -157,7 +200,7 @@ def main():
             assert normal.call("save_trigger",**flow)["destination_id"]=="review"
             for client in (a,basic):
                 assert client.call("list_triggers")["triggers"]==[]
-                for method,kwargs in [("get_trigger",{}),("save_trigger",{"disabled":True,"revision":1})]:
+                for method,kwargs in [("get_trigger",{}),("run_trigger_now",{"dry_run":True}),("save_trigger",{"disabled":True,"revision":1})]:
                     try: client.call(method,trigger_id="qa-review",**kwargs)
                     except RuntimeError: pass
                     else: raise AssertionError("access to another identity's subscription")
@@ -167,6 +210,9 @@ def main():
             for _ in range(2):producer.call("publish_event",**event)
             eventually(lambda:received)
             history=eventually(lambda:(x:=normal.call("get_trigger",trigger_id="qa-review")["deliveries"]) and x[0]["status"]=="accepted" and x)
+            preview=normal.call("run_trigger_now",trigger_id="qa-review",event_id="qa-731",dry_run=True)
+            assert preview["status"]=="preview" and preview["input"]["event"]["eventId"]=="qa-731"
+            assert normal.rpc("tools/call",{"name":"run_trigger_now","arguments":{"trigger_id":"qa-review","event_id":"absent"}})["isError"]
             assert len(history)==len(received)==1 and received[0]["delivery_id"]==history[0]["id"]
             assert received[0]["instruction"]=="Triage this failure."
             assert normal.call("get_skill",skill_id=received[0]["skill_ref"])["text"]
@@ -180,6 +226,7 @@ def main():
             a=Agent(state)
             assert "backlog" in a.call("bridge_get_status")
             a.call("save_trigger",trigger_id="auto-review",when=dict(type="event",source_id="qa",event_name="run.ready"),destination_id="review")
+            verify_independent_cli(a,producer,Path(tmp))
             a.close()
             qa_events.write_text(json.dumps([{"eventId":"r1","name":"run.ready","data":{"run":"qa-1"}}]))
             eventually(lambda:any(x["flow_id"]=="auto-review" for x in received))

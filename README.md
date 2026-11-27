@@ -6,6 +6,8 @@
 
 MCP Bridge 支持本机 stdio 和 Streamable HTTP 接入。已有运行中的实例可直接配置客户端。
 
+Apple Silicon macOS 和 Windows 11 x64 的压缩包提供用户级安装、登录自启动和原生 Python handler。[安装与验收说明](docs/platforms.md)
+
 ## 启动本机服务
 
 在 Linux 上使用 Go 1.26，从仓库根目录运行以下命令。首次启动生成主密钥，后续启动复用同一文件。已有部署请沿用原主密钥和数据目录。

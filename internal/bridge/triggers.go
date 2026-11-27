@@ -141,6 +141,7 @@ func triggerView(f Flow, rev int) Object {
 
 func (b *Bridge) triggerQueries(v *view) {
 	p := v.user
+	tool(v.server, "run_trigger_now", "For an explicit request to execute or test-send, enqueue one real delivery through an enabled trigger. For an event trigger supply a matching stored event_id. dry_run previews without execution or delivery. Reuse request_id when retrying the same send. For the receipt call get_trigger with the returned run_id, trigger_id and wait_ms.", func(ctx context.Context, in manualRunInput) (any, error) { return b.runNow(ctx, p, in) })
 	tool(v.server, "list_triggers", "List your triggers and their current revisions.", func(_ context.Context, in struct {
 		Offset int `json:"offset,omitempty"`
 	}) (any, error) {
@@ -163,10 +164,18 @@ func (b *Bridge) triggerQueries(v *view) {
 		batch, next := page(items, in.Offset)
 		return Object{"triggers": batch, "next_offset": next}, nil
 	})
-	tool(v.server, "get_trigger", "Inspect a trigger and recent deliveries, or a specific run including retained replay evidence.", func(_ context.Context, in struct {
-		ID  string `json:"trigger_id"`
-		Run string `json:"run_id,omitempty"`
+	tool(v.server, "get_trigger", "Inspect a trigger and recent deliveries, or a specific run including retained replay evidence. view=latest gives one compact outcome; pass run_id to pin the receipt and wait_ms to wait up to 30 seconds.", func(ctx context.Context, in struct {
+		ID   string `json:"trigger_id"`
+		Run  string `json:"run_id,omitempty"`
+		View string `json:"view,omitempty"`
+		Wait int    `json:"wait_ms,omitempty"`
 	}) (any, error) {
+		if in.View == "latest" || (in.View == "" && in.Wait != 0) {
+			return b.latestRun(ctx, p, in.ID, in.Run, in.Wait)
+		}
+		if in.View != "" {
+			return nil, errors.New("unsupported trigger view; use latest for a compact receipt")
+		}
 		if in.Run != "" {
 			return b.runDetails(p, in.ID, in.Run)
 		}
@@ -318,6 +327,10 @@ func (b *Bridge) queueTrigger(tx *sql.Tx, f Flow, key string, args Object) error
 		instance = f.ID
 	}
 	id := digest([]byte(instance + "\x00" + f.Source + "\x00" + key))
+	return b.enqueueRun(tx, f, instance, id, args)
+}
+
+func (b *Bridge) enqueueRun(tx *sql.Tx, f Flow, instance, id string, args Object) error {
 	args["trigger_id"] = f.ID
 	args["run_id"] = id
 	in := invocation{Args: args, Handler: f.Handler, Destination: f.Destination, Skill: f.Skill, Instruction: f.Instruction, Replay: f.Replay}

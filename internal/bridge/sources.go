@@ -7,13 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"newmcp/mcp-bridge/internal/platform"
 )
 
 func (b *Bridge) replace(src Source, r *backend, remove bool) {
@@ -148,7 +148,7 @@ func connect(ctx context.Context, src Source) (*backend, error) {
 	case "stdio":
 		cmd := exec.Command(src.Command, src.Args...)
 		cmd.Dir = src.Cwd
-		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "LANG=C.UTF-8"}
+		cmd.Env = platform.ChildEnv(false)
 		for k, v := range src.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}

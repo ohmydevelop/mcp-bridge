@@ -41,7 +41,7 @@ def check(root):
     presets.append(dict(id="slow", command=sys.executable, args=["-c",
         "from pathlib import Path; import time; p=Path('started'); p.open('a').write('1'); time.sleep(90)"],
         cwd=str(root), input_format="json"))
-    (state / "cli-destinations.json").write_text(json.dumps(presets))
+    (state / "cli-destinations.json").write_text(json.dumps([{**presets[0], "args": ["-V"]}, presets[2]]))
     env = {**os.environ, "BRIDGE_MASTER_KEY": secrets.token_hex(32)}
 
     def start():
@@ -56,7 +56,8 @@ def check(root):
             agent.call("bridge_create_source", source={"id": "meter", "type": "stdio",
                        "command": sys.executable, "args": [str(fixture / "server.py")],
                        "env": {"QA_EVENT_FILE": str(event_path)}, "events": {"reading.ready": "poll_runs"}})
-            for name in ("json", "prompt", "slow"):
+            agent.call("bridge_save_destination", destination={**presets[0], "type": "cli_process"}, revision=1)
+            for name in ("json", "slow"):
                 agent.call("save_trigger", trigger_id=name, when=WHEN, destination_id=name,
                            instruction="check receipt")
             assert not agent.call("bridge_get_status")["current_terminal"]
@@ -71,6 +72,14 @@ def check(root):
         with closing(Agent(state)) as agent:
             wait_for(lambda: any(row["id"] == current and row["online"]
                                  for row in agent.call("bridge_get_status")["destinations"]))
+            prompt = {**presets[1], "type": "cli_process"}
+            agent.call("bridge_save_destination", destination={**prompt, "args": ["-V"]}, revision=0)
+            agent.call("save_trigger", trigger_id="prompt", when=WHEN, destination_id="prompt",
+                       instruction="check receipt")
+            agent.call("bridge_save_destination", destination=prompt, revision=1)
+            stale = agent.rpc("tools/call", {"name": "bridge_save_destination", "arguments": {
+                "destination": {**prompt, "args": ["-V"]}, "revision": 1}})
+            assert stale["isError"] and "revision conflict" in stale["content"][0]["text"]
             event_path.write_text(json.dumps([{"eventId": "one", "name": "reading.ready",
                                                "data": {"text": "literal $(id)"}}]))
             for name, status in (("json", "completed"), ("prompt", "failed"), ("bound", "submitted")):

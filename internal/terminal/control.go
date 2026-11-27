@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net"
+	"newmcp/mcp-bridge/internal/localipc"
 	"time"
 )
 
@@ -28,9 +28,9 @@ func ID(token string) string {
 	s := sha256.Sum256([]byte(token))
 	return "term-" + hex.EncodeToString(s[:16])
 }
-func request(socket, token, action, id string) (Reply, error) {
+func request(dir, token, action, id string) (Reply, error) {
 	var out Reply
-	c, err := net.DialTimeout("unix", socket, time.Second)
+	c, err := localipc.Dial(dir)
 	if err != nil {
 		return out, err
 	}
