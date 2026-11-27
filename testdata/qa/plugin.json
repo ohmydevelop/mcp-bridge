@@ -1,0 +1,1 @@
+{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"qa-demo","version":"1.0.0","description":"Deterministic QA adapter used by the bridge acceptance test."}
