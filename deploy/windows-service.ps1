@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param([ValidateSet('install', 'status', 'refresh-python', 'serve', 'uninstall')][string]$Action = 'status')
 $ErrorActionPreference = 'Stop'
+# Prefer the modules shipped with this PowerShell when launched from pwsh or an IDE.
+$env:PSModulePath = "$PSHOME\Modules;$env:PSModulePath"
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $sid = $identity.User
 $state = Join-Path $env:USERPROFILE '.mcp-bridge'
