@@ -20,6 +20,13 @@ func (b *Bridge) session(p Principal, id string) (*mcp.ClientSession, error) {
 	return r.session, nil
 }
 func (b *Bridge) call(ctx context.Context, p Principal, id, n string, arguments any) (*mcp.CallToolResult, error) {
+	if id == "bridge.builtin" {
+		return b.runBinding(ctx, p, n, arguments)
+	}
+	return b.callUpstream(ctx, p, id, n, arguments)
+}
+
+func (b *Bridge) callUpstream(ctx context.Context, p Principal, id, n string, arguments any) (*mcp.CallToolResult, error) {
 	b.mu.RLock()
 	src := b.sources[id]
 	r := b.live[id]

@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"fmt"
+	"newmcp/mcp-bridge/internal/storage"
 
 	"encoding/json"
 	"errors"
@@ -99,6 +101,17 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 	}) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
+		defs, e := storage.List[Binding](b.store, "binding")
+		if e != nil {
+			return nil, e
+		}
+		for _, def := range defs {
+			for _, ref := range def.Uses {
+				if strings.HasPrefix(ref, in.ID+"/") {
+					return nil, fmt.Errorf("source referenced by tool %s", def.ID)
+				}
+			}
+		}
 		if in.Revision < 1 {
 			return nil, errors.New("existing revision required")
 		}
@@ -109,6 +122,7 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		return Object{"removed": in.ID}, nil
 	})
 
+	b.bindingTools(v)
 	b.sourceTools(v)
 
 	b.skillTools(v)

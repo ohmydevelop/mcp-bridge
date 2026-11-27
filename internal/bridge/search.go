@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"newmcp/mcp-bridge/internal/storage"
 	"sort"
 	"strings"
 )
@@ -70,6 +71,10 @@ func (b *Bridge) aliases(source, key string) []string {
 	return b.sources[source].Aliases[key]
 }
 func (b *Bridge) searchTools(p Principal, q inputQuery) (Object, error) {
+	defs, e := storage.List[Binding](b.store, "binding")
+	if e != nil {
+		return nil, e
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	var hits []searchHit
@@ -85,6 +90,13 @@ func (b *Bridge) searchTools(p Principal, q inputQuery) (Object, error) {
 		for n, t := range r.tools {
 			if !member(s.Hidden, n) {
 				add(id, n, t.Description, s.Aliases["tool:"+n], t.InputSchema)
+			}
+		}
+	}
+	if q.Source == "" || q.Source == "bridge.builtin" {
+		for _, d := range defs {
+			if b.bindingAllowed(p, d) {
+				add("bridge.builtin", d.ID, d.Description, d.Aliases, d.Schema)
 			}
 		}
 	}
