@@ -134,6 +134,6 @@ if __name__=="__main__":
         provider.origin=f"http://127.0.0.1:{provider.server_port}"
         provider.grants=[]
         threading.Thread(target=provider.serve_forever,daemon=True).start()
-        run(Path(temp),provider)
+        run(Path(temp)/"state",provider)
         provider.shutdown()
     print("PASS OAuth client credentials, enterprise exchange, browser PKCE and persisted grant")

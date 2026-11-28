@@ -374,6 +374,6 @@ if __name__=="__main__":
     else:
         with tempfile.TemporaryDirectory() as temp, ThreadingHTTPServer(("127.0.0.1",0),Upstream) as up:
             threading.Thread(target=up.serve_forever,daemon=True).start()
-            check(Path(temp), f"http://127.0.0.1:{up.server_port}/mcp")
+            check(Path(temp)/"state", f"http://127.0.0.1:{up.server_port}/mcp")
             up.shutdown()
         print("PASS modern Skills, Tasks, Elicitation and Files over stdio and Streamable HTTP upstreams")
