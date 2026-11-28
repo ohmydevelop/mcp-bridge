@@ -5,6 +5,8 @@ build:
 check: build
 	go vet ./...
 	go test -race ./...
+	python3 tests/standard_relay.py
+	python3 tests/source_oauth.py
 	python3 tests/acceptance.py
 	python3 tests/local_destinations.py
 	python3 tests/trigger_intent.py

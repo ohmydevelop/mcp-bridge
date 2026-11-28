@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"sync"
@@ -16,7 +17,11 @@ type streamSink struct {
 	ctx    context.Context
 	frames chan []byte
 }
-type streamHub struct{ pending, active sync.Map }
+type streamHub struct {
+	pending, active, progress sync.Map
+	subMu                     sync.Mutex
+	subscriptions             map[string]int
+}
 
 func (h *streamHub) stream(ctx context.Context, session *mcp.ClientSession, f Flow, cursor any, frame func([]byte) error) error {
 	key := uuid.NewString()
@@ -46,6 +51,28 @@ func (h *streamHub) stream(ctx context.Context, session *mcp.ClientSession, f Fl
 	}
 }
 func (c upstreamConn) Write(ctx context.Context, msg jsonrpc.Message) error {
+	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == relayMethod {
+		var envelope relayParams
+		dec := json.NewDecoder(bytes.NewReader(req.Params))
+		dec.UseNumber()
+		if err := dec.Decode(&envelope); err != nil {
+			return err
+		}
+		meta, _ := envelope.Body["_meta"].(map[string]any)
+		for key, value := range envelope.Meta {
+			if key != mcp.MetaKeyClientCapabilities {
+				meta[key] = value
+			}
+		}
+		copy := *req
+		copy.Method = envelope.Method
+		raw, err := json.Marshal(envelope.Body)
+		if err != nil {
+			return err
+		}
+		copy.Params = raw
+		return c.Connection.Write(ctx, &copy)
+	}
 	if req, ok := msg.(*jsonrpc.Request); ok && req.Method == "events/stream" {
 		var params Object
 		if e := json.Unmarshal(req.Params, &params); e != nil {

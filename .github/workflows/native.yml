@@ -52,6 +52,8 @@ jobs:
               assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected, name
               shutil.unpack_archive(archive, dest)
       - run: python tests/native_platform.py dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }} --late-python "${{ steps.late-python.outputs.python-path }}"
+      - run: python tests/standard_relay.py --binary dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }}
+      - run: python tests/source_oauth.py --binary dist/mcp-bridge-${{ matrix.target }}/${{ matrix.binary }}
       - run: python tests/native_install.py dist/mcp-bridge-${{ matrix.target }} --late-python "${{ steps.late-python.outputs.python-path }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -80,4 +82,6 @@ jobs:
       - run: python deploy/package.py --target windows-amd64
       - run: Expand-Archive -Force dist/mcp-bridge-windows-amd64.zip .native-release
       - run: python tests/native_platform.py .native-release/mcp-bridge-windows-amd64/mcp-bridge.exe --late-python "${{ steps.late-python.outputs.python-path }}"
+      - run: python tests/standard_relay.py --binary .native-release/mcp-bridge-windows-amd64/mcp-bridge.exe
+      - run: python tests/source_oauth.py --binary .native-release/mcp-bridge-windows-amd64/mcp-bridge.exe
       - run: python tests/native_install.py .native-release/mcp-bridge-windows-amd64 --late-python "${{ steps.late-python.outputs.python-path }}"

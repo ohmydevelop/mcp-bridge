@@ -17,7 +17,7 @@ func TestCatalogNoticeIsAtomicAndDirected(t *testing.T) {
 	if err := b.store.DB.QueryRow("SELECT id FROM deliveries WHERE flow='first'").Scan(&trigger); err != nil {
 		t.Fatal(err)
 	}
-	def := Binding{ID: "bot_flags"}
+	def := Binding{ID: "bot_flags", Runtime: "python", PythonScript: PythonScript{Script: "def run(args, ctx): return 1"}}
 	publish := func(id string) error { return b.publishForTrigger(t.Context(), "admin", def, 0, id) }
 	if publish("unknown") == nil {
 		t.Fatal("accepted unknown trigger")

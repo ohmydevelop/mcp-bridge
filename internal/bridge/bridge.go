@@ -20,6 +20,7 @@ type Profile struct {
 	Producer string `json:"producer_source,omitempty"`
 }
 type Source struct {
+	OAuth   *sourceOAuth        `json:"oauth,omitempty"`
 	Owner   string              `json:"owner,omitempty"`
 	Events  map[string]string   `json:"events,omitempty"`
 	Aliases map[string][]string `json:"aliases,omitempty"`
@@ -40,29 +41,40 @@ type Source struct {
 	Disabled bool              `json:"disabled,omitempty"`
 }
 type backend struct {
-	hub       *streamHub
-	resources []*mcp.Resource
-	prompts   []*mcp.Prompt
-	session   *mcp.ClientSession
-	tools     map[string]*mcp.Tool
+	oauth           *protectedOAuth
+	transportSource Source
+	hub             *streamHub
+	templates       []*mcp.ResourceTemplate
+	resources       []*mcp.Resource
+	prompts         []*mcp.Prompt
+	session         *mcp.ClientSession
+	tools           map[string]*mcp.Tool
 }
 type view struct {
-	prompts []string
-	user    Principal
-	server  *mcp.Server
-	uris    []string
+	reserved  map[string]bool
+	scope     string
+	fileTools map[string]string
+	prompts   []string
+	user      Principal
+	server    *mcp.Server
+	templates []string
+	uris      []string
 }
 type Bridge struct {
-	registerApp   func(*mcp.Server)
-	profiles      map[string]Profile
-	presets       map[string]Destination
-	terminals     sync.Map
-	verified      sync.Map
-	activeStreams sync.Map
-	pollSchedule  sync.Map
-	streamWG      sync.WaitGroup
-	store         *storage.Store
-	dir           string
+	scopedViews             map[[2]string]*view
+	oauthStates, oauthFlows sync.Map
+	catalogChanged          chan struct{}
+	scriptsMu               sync.RWMutex
+	registerApp             func(*mcp.Server)
+	profiles                map[string]Profile
+	presets                 map[string]Destination
+	terminals               sync.Map
+	verified                sync.Map
+	activeStreams           sync.Map
+	pollSchedule            sync.Map
+	streamWG                sync.WaitGroup
+	store                   *storage.Store
+	dir                     string
 	// Serializes reconfiguration and publication of a new catalog.
 	modify  sync.Mutex
 	mu      sync.RWMutex
@@ -83,7 +95,7 @@ func openBridge(ctx context.Context, dir string, key []byte) (*Bridge, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := &Bridge{store: store, dir: dir, ctx: ctx, sources: map[string]Source{}, live: map[string]*backend{}, views: map[Principal]*view{}}
+	b := &Bridge{catalogChanged: make(chan struct{}, 1), store: store, dir: dir, ctx: ctx, sources: map[string]Source{}, live: map[string]*backend{}, views: map[Principal]*view{}}
 	rows, err := storage.List[Source](b.store, "source")
 	if err != nil {
 		store.DB.Close()

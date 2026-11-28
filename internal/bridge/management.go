@@ -20,7 +20,7 @@ type sourceRevision struct {
 }
 
 func (b *Bridge) management(v *view) {
-	tool(v.server, "bridge_get_status", "Discover webhook, terminal and CLI destinations and the current terminal ID. Inspect Bridge health, delivery backlog, published tool revisions or a source configuration. Pass destination_id to read the effective definition and revision for editing.", func(ctx context.Context, in struct {
+	tool(v, "bridge_get_status", "Discover webhook, terminal and CLI destinations and the current terminal ID. Inspect Bridge health, delivery backlog, published tool revisions or a source configuration. Pass destination_id to read the effective definition and revision for editing.", func(ctx context.Context, in struct {
 		Source      string `json:"source_id,omitempty"`
 		Destination string `json:"destination_id,omitempty"`
 	}) (any, error) {
@@ -162,5 +162,5 @@ func configValue(v any, def plugin.Setting) (string, error) {
 	return "", errors.New("setting type mismatch")
 }
 func sameConnection(a, b Source) bool {
-	return a.Type == b.Type && a.Command == b.Command && a.URL == b.URL && a.Cwd == b.Cwd && reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.Env, b.Env) && reflect.DeepEqual(a.Headers, b.Headers)
+	return reflect.DeepEqual(a.OAuth, b.OAuth) && a.Type == b.Type && a.Command == b.Command && a.URL == b.URL && a.Cwd == b.Cwd && reflect.DeepEqual(a.Args, b.Args) && reflect.DeepEqual(a.Env, b.Env) && reflect.DeepEqual(a.Headers, b.Headers)
 }

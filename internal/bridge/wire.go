@@ -104,7 +104,7 @@ func parseSSE(reader io.Reader, frame func([]byte) error) error {
 	}
 	return nil
 }
-func modernRPC(ctx context.Context, src Source, method, name string, args Object, frame func([]byte) error) error {
+func modernRPC(ctx context.Context, src Source, oauth *protectedOAuth, method, name string, args Object, frame func([]byte) error) error {
 	args["_meta"] = Object{mcp.MetaKeyProtocolVersion: "2026-07-28", mcp.MetaKeyClientCapabilities: Object{"extensions": Object{eventsExt: Object{}, skillsExt: Object{}}}, mcp.MetaKeyClientInfo: mcpinfo.Implementation}
 	raw, e := json.Marshal(Object{"jsonrpc": "2.0", "id": 1, "method": method, "params": args})
 	if e != nil {
@@ -124,6 +124,9 @@ func modernRPC(ctx context.Context, src Source, method, name string, args Object
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	if err := oauth.attach(req); err != nil {
+		return err
+	}
 	res, e := (&http.Client{CheckRedirect: rejectRedirect}).Do(req)
 	if e != nil {
 		return e

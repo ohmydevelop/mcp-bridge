@@ -295,3 +295,57 @@ func TestCompletionPollRespectsOwnerAndAdvancesCursor(t *testing.T) {
 		t.Fatal(state, err)
 	}
 }
+
+func TestDestinationAndReceiptRetirement(t *testing.T) {
+	b := testBridge(t)
+	client := clientFor(t, b, Principal{"operator"})
+	call := func(name string, args Object) Object {
+		t.Helper()
+		v, err := client.CallTool(t.Context(), &mcp.CallToolParams{Name: name, Arguments: args})
+		if err != nil || v.IsError {
+			t.Fatalf("%s: %v %v", name, err, v.Content)
+		}
+		return v.StructuredContent.(map[string]any)
+	}
+	url := "http://127.0.0.1:8912"
+	t.Setenv("BRIDGE_WEBHOOK_ORIGINS", url)
+	call("bridge_save_destination", Object{"destination": Object{"id": "target", "url": url}, "revision": 0})
+	schedule := Object{"type": "schedule", "cron": "0 0 1 1 *", "timezone": "UTC"}
+	for _, id := range []string{"one", "two"} {
+		call("save_trigger", Object{"trigger_id": id, "when": schedule, "destination_id": "target"})
+	}
+	run := call("run_trigger_now", Object{"trigger_id": "one"})["run_id"]
+	if got := call("delete_trigger", Object{"trigger_id": "one", "revision": 1, "delete_unused_destination": true}); got["destination_cleanup"] != "referenced_by_trigger" {
+		t.Fatal(got)
+	}
+	if got := call("delete_trigger", Object{"trigger_id": "two", "revision": 1, "delete_unused_destination": true}); got["destination_cleanup"] != "removed" {
+		t.Fatal(got)
+	}
+	checkCount := func(table string, want int) {
+		t.Helper()
+		var n int
+		if err := b.store.DB.QueryRow("SELECT count(*) FROM "+table+" WHERE id=?", run).Scan(&n); err != nil || n != want {
+			t.Fatalf("%s %d %v", table, n, err)
+		}
+	}
+	prune := func() {
+		t.Helper()
+		if err := b.pruneRetired(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prune()
+	checkCount("trigger_runs", 1)
+	if _, err := b.store.DB.Exec("UPDATE retired_instances SET retired_at=1; UPDATE deliveries SET status='submitting'"); err != nil {
+		t.Fatal(err)
+	}
+	prune()
+	checkCount("deliveries", 1)
+	if _, err := b.store.DB.Exec("UPDATE deliveries SET status='completed'; INSERT INTO local_deliveries(id,kind) SELECT id,'cli_process' FROM deliveries"); err != nil {
+		t.Fatal(err)
+	}
+	prune()
+	for _, table := range []string{"trigger_runs", "deliveries", "local_deliveries"} {
+		checkCount(table, 0)
+	}
+}

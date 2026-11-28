@@ -27,32 +27,37 @@ type toolVersion struct {
 }
 
 func (b *Bridge) readVersion(ref toolVersion, p Principal) (Binding, int, error) {
-	var d Binding
+	b.scriptsMu.RLock()
+	defer b.scriptsMu.RUnlock()
+	var record storedBinding
 	id, ok := strings.CutPrefix(ref.ID, "bridge.builtin/")
 	if !ok || id == "" || ref.Revision < 0 {
-		return d, 0, errors.New("expected saved tool_id")
+		return Binding{}, 0, errors.New("expected saved tool_id")
 	}
 	var err error
 	rev := ref.Revision
 	if rev == 0 {
-		rev, err = b.store.Get("binding", id, &d)
+		rev, err = b.store.Get("binding", id, &record)
 	} else {
 		var raw []byte
 		err = b.store.DB.QueryRow("SELECT data FROM binding_versions WHERE id=? AND revision=?", id, rev).Scan(&raw)
 		if err == nil {
-			err = b.store.Decode("binding", id, raw, &d)
+			err = b.store.Decode("binding", id, raw, &record)
 		}
 	}
 	if err != nil {
-		return d, 0, err
+		return Binding{}, 0, err
 	}
 	b.mu.RLock()
-	ok = b.bindingAllowed(p, d)
+	ok = b.bindingAllowed(p, record.Binding)
 	b.mu.RUnlock()
 	if !ok {
-		return d, 0, errors.New("tool unavailable")
+		return Binding{}, 0, errors.New("tool unavailable")
 	}
-	return d, rev, nil
+	if record.Hash != "" {
+		record.Script, err = b.readScript(record.Hash)
+	}
+	return record.Binding, rev, err
 }
 
 func (w triggerWhen) schedule() (cron.Schedule, error) {
@@ -141,8 +146,8 @@ func triggerView(f Flow, rev int) Object {
 
 func (b *Bridge) triggerQueries(v *view) {
 	p := v.user
-	tool(v.server, "run_trigger_now", "For an explicit request to execute or test-send, enqueue one real delivery through an enabled trigger. For an event trigger supply a matching stored event_id. dry_run previews without execution or delivery. Reuse request_id when retrying the same send. For the receipt call get_trigger with the returned run_id, trigger_id and wait_ms.", func(ctx context.Context, in manualRunInput) (any, error) { return b.runNow(ctx, p, in) })
-	tool(v.server, "list_triggers", "List your triggers and their current revisions.", func(_ context.Context, in struct {
+	tool(v, "run_trigger_now", "For an explicit request to execute or test-send, enqueue one real delivery through an enabled trigger. For an event trigger supply a matching stored event_id. dry_run previews without execution or delivery. Reuse request_id when retrying the same send. For the receipt call get_trigger with the returned run_id, trigger_id and wait_ms.", func(ctx context.Context, in manualRunInput) (any, error) { return b.runNow(ctx, p, in) })
+	tool(v, "list_triggers", "List your triggers and their current revisions.", func(_ context.Context, in struct {
 		Offset int `json:"offset,omitempty"`
 	}) (any, error) {
 		list, err := storage.List[Flow](b.store, "flow")
@@ -164,7 +169,7 @@ func (b *Bridge) triggerQueries(v *view) {
 		batch, next := page(items, in.Offset)
 		return Object{"triggers": batch, "next_offset": next}, nil
 	})
-	tool(v.server, "get_trigger", "Inspect a trigger and recent deliveries, or a specific run including retained replay evidence. view=latest gives one compact outcome; pass run_id to pin the receipt and wait_ms to wait up to 30 seconds.", func(ctx context.Context, in struct {
+	tool(v, "get_trigger", "Inspect a trigger and recent deliveries, or a specific run including retained replay evidence. view=latest gives one compact outcome; pass run_id to pin the receipt and wait_ms to wait up to 30 seconds.", func(ctx context.Context, in struct {
 		ID   string `json:"trigger_id"`
 		Run  string `json:"run_id,omitempty"`
 		View string `json:"view,omitempty"`
@@ -232,9 +237,10 @@ func (b *Bridge) triggerQueries(v *view) {
 		}
 		return out, nil
 	})
-	tool(v.server, "delete_trigger", "Retire a trigger by ID and revision, retaining its execution history.", func(_ context.Context, in struct {
+	tool(v, "delete_trigger", "Retire a trigger by ID and revision, retaining receipts for 30 days. Set delete_unused_destination to remove an owned, unused managed target as well.", func(ctx context.Context, in struct {
 		ID       string `json:"trigger_id"`
 		Revision int    `json:"revision"`
+		Cleanup  bool   `json:"delete_unused_destination,omitempty"`
 	}) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
@@ -266,6 +272,17 @@ func (b *Bridge) triggerQueries(v *view) {
 		if _, err = tx.Exec("UPDATE deliveries SET flow=? WHERE flow=?", "archived/"+f.Instance+"/"+f.ID, f.ID); err != nil {
 			return nil, err
 		}
+		if _, err = tx.Exec("INSERT INTO retired_instances VALUES(?,unixepoch())", f.Instance); err != nil {
+			return nil, err
+		}
+		result := Object{"trigger_id": f.ID, "deleted": true, "destination_id": f.Destination}
+		if in.Cleanup {
+			state, err := b.removeUnusedDestination(ctx, tx, p, f.Destination, 0)
+			if err != nil {
+				return nil, err
+			}
+			result["destination_cleanup"] = state
+		}
 		if err = tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -273,7 +290,7 @@ func (b *Bridge) triggerQueries(v *view) {
 		if stop, ok := b.activeStreams.Load(f.ID); ok {
 			stop.(context.CancelFunc)()
 		}
-		return Object{"trigger_id": f.ID, "deleted": true}, nil
+		return result, nil
 	})
 }
 
@@ -288,7 +305,8 @@ func (b *Bridge) migrateTriggers() error {
 	if err != nil {
 		return err
 	}
-	for _, f := range flows {
+	for i := range flows {
+		f := &flows[i]
 		if f.Instance != "" {
 			continue
 		}
@@ -300,6 +318,9 @@ func (b *Bridge) migrateTriggers() error {
 		if _, err = tx.Exec("UPDATE objects SET data=? WHERE kind='flow' AND id=?", raw, f.ID); err != nil {
 			return err
 		}
+	}
+	if err := migrateRetirement(tx, flows); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

@@ -56,7 +56,7 @@ func (b *Bridge) writeFlow(f Flow, p Principal, rev int) (Object, error) {
 	return Object{"trigger_id": f.ID, "destination_id": f.Destination, "disabled": f.Disabled, "revision": saved}, nil
 }
 func (b *Bridge) producerTool(s *mcp.Server, source string) {
-	tool(s, "publish_event", "Report an occurrence from this credential's bound event source.", func(ctx context.Context, in struct {
+	tool(&view{server: s}, "publish_event", "Report an occurrence from this credential's bound event source.", func(ctx context.Context, in struct {
 		ID   string `json:"event_id"`
 		Name string `json:"event_name"`
 		Data Object `json:"data"`

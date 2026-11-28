@@ -154,5 +154,5 @@ func (b *Bridge) resolve(s Source) (Source, error) {
 	default:
 		return s, fmt.Errorf("unsupported source type %q on %s", s.Type, runtime.GOOS)
 	}
-	return s, nil
+	return s, s.OAuth.validate(s)
 }

@@ -28,6 +28,9 @@ func testBridge(t *testing.T) *Bridge {
 		t.Fatal(e)
 	}
 	t.Cleanup(func() { cancel(); b.streamWG.Wait(); b.store.DB.Close() })
+	if err := b.migrateTriggers(); err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 func clientFor(t *testing.T, b *Bridge, p Principal) *mcp.ClientSession {

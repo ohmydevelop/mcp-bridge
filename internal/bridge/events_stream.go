@@ -40,6 +40,9 @@ type streamRequest struct {
 }
 
 func (b *Bridge) stream(ctx context.Context, p Principal, r streamRequest, send func(Object) error) error {
+	if r.Method == "subscriptions/listen" {
+		return b.taskStream(ctx, p, r, send)
+	}
 	src, name, e := b.localType(p, r.Params.Name)
 	if e != nil {
 		return e
@@ -88,7 +91,13 @@ func (b *Bridge) stream(ctx context.Context, p Principal, r streamRequest, send 
 		}
 	}
 }
+func taskMethod(method string) bool {
+	return method == "tasks/get" || method == "tasks/update" || method == "tasks/cancel"
+}
 func extensionNamed(method string) bool {
+	if taskMethod(method) {
+		return true
+	}
 	switch method {
 	case "events/poll", "events/stream", "events/subscribe", "events/unsubscribe":
 		return true
@@ -101,7 +110,12 @@ func (b *Bridge) httpMCP(p Principal, next http.Handler) http.Handler {
 		if extensionNamed(method) {
 			var q streamRequest
 			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
-			if err != nil || json.Unmarshal(data, &q) != nil || q.Method != method || q.Params.Name == "" || r.Header.Get("Mcp-Name") != q.Params.Name {
+			decodeErr := json.Unmarshal(data, &q)
+			key := q.Params.Name
+			if taskMethod(method) {
+				key = q.Params.Task
+			}
+			if err != nil || decodeErr != nil || q.Method != method || key == "" || r.Header.Get("Mcp-Name") != key {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(Object{"jsonrpc": "2.0", "id": q.ID, "error": Object{"code": -32020, "message": "Mcp-Name or Mcp-Method mismatch"}})
@@ -109,12 +123,26 @@ func (b *Bridge) httpMCP(p Principal, next http.Handler) http.Handler {
 			}
 			r.Body = io.NopCloser(bytes.NewReader(data))
 		}
-		if method != "events/stream" {
+		if method == "subscriptions/listen" {
+			data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+			if err != nil {
+				http.Error(w, "invalid subscription", 400)
+				return
+			}
+			var q streamRequest
+			if json.Unmarshal(data, &q) != nil || q.Params.Notifications.Tasks == nil {
+				r.Body = io.NopCloser(bytes.NewReader(data))
+				next.ServeHTTP(w, r)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(data))
+		}
+		if method != "events/stream" && method != "subscriptions/listen" {
 			next.ServeHTTP(w, r)
 			return
 		}
 		var q streamRequest
-		if r.Method != "POST" || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil || q.Method != "events/stream" || q.Params.Name != r.Header.Get("Mcp-Name") || r.Header.Get("MCP-Protocol-Version") != "2026-07-28" {
+		if r.Method != "POST" || json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&q) != nil || q.Method != method || (method == "events/stream" && q.Params.Name != r.Header.Get("Mcp-Name")) || r.Header.Get("MCP-Protocol-Version") != "2026-07-28" {
 			http.Error(w, "invalid stream request", 400)
 			return
 		}
@@ -136,6 +164,10 @@ func (b *Bridge) httpMCP(p Principal, next http.Handler) http.Handler {
 	})
 }
 func errorFrame(id any, e error) Object {
+	var rpc *jsonrpc.Error
+	if errors.As(e, &rpc) {
+		return Object{"jsonrpc": "2.0", "id": id, "error": rpc}
+	}
 	return Object{"jsonrpc": "2.0", "id": id, "error": Object{"code": -32602, "message": e.Error()}}
 }
 
@@ -193,7 +225,13 @@ func (c *streamConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 				continue
 			}
 		}
-		if req.Method != "events/stream" {
+		if req.Method == "subscriptions/listen" {
+			var p extParams
+			if json.Unmarshal(req.Params, &p) != nil || p.Notifications.Tasks == nil {
+				return msg, nil
+			}
+		}
+		if req.Method != "events/stream" && req.Method != "subscriptions/listen" {
 			return msg, nil
 		}
 		raw, e := jsonrpc.EncodeMessage(req)
@@ -204,7 +242,7 @@ func (c *streamConn) Read(ctx context.Context) (jsonrpc.Message, error) {
 		if e = json.Unmarshal(raw, &q); e != nil {
 			return nil, e
 		}
-		sub, end := context.WithCancel(c.life)
+		sub, end := context.WithCancel(context.WithValue(c.life, localConnectionKey{}, true))
 		if _, exists := c.streams.LoadOrStore(q.ID, end); exists {
 			end()
 			return nil, errors.New("duplicate stream id")

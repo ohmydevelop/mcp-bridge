@@ -149,7 +149,9 @@ def main():
             names=lambda client:{t["name"] for t in client.rpc("tools/list",{})["tools"]}
             business={"bridge_execute_script","search_tools","call_tool","search_skills","get_skill","search_event_types","save_trigger","run_trigger_now","get_trigger","bridge_get_tool","list_triggers","delete_trigger"}
             mgmt={"bridge_create_source","bridge_update_source","bridge_delete_source","bridge_save_tool","bridge_delete_tool","bridge_save_destination","bridge_delete_destination","bridge_get_status","bridge_list_sources"}
-            assert names(basic)==names(normal)==names(a)==business|mgmt
+            mgmt.add("bridge_begin_oauth")
+            assert names(basic)==names(normal)==business|mgmt
+            assert names(a)==business|mgmt|{"bridge_discover_server"}
             assert names(producer)=={"publish_event"}
             assert "backlog" in basic.call("bridge_get_status")
             remote_cli = basic.rpc("tools/call", {"name": "bridge_save_destination", "arguments": {
@@ -184,7 +186,7 @@ def main():
             else: raise AssertionError("revoked source grant still allows composition")
             a.call("bridge_update_source",source_id="qa",revision=5,patch={"grants":["reader","basic"]})
             basic.call("bridge_delete_tool",id="summary",revision=1)
-            assert names(a)==business|mgmt
+            assert names(a)==business|mgmt|{"bridge_discover_server"}
             for query in ("查询失败用例","qa/failure_summary","summary"):
                 assert normal.call("search_tools",query=query)["tools"][0]["tool_id"]=="qa/failure_summary"
             skill=normal.call("search_skills",query="排查失败")["skills"][0]["skill_id"]
@@ -216,10 +218,13 @@ def main():
             assert len(history)==len(received)==1 and received[0]["delivery_id"]==history[0]["id"]
             assert received[0]["instruction"]=="Triage this failure."
             assert normal.call("get_skill",skill_id=received[0]["skill_ref"])["text"]
+            basic.call("bridge_save_tool",name="restore_probe",description="Cold backup check",input_schema={"type":"object"},
+                       uses=[],script="def run(args,ctx): return 17")
         restored=Path(tmp)/"restored"
         shutil.copytree(state,restored,ignore=shutil.ignore_patterns("bridge.sock","bridge.lock"))
         state=restored
         with daemon():
+            assert basic.call("call_tool",tool_id="bridge.builtin/restore_probe",arguments={}) == {"result":17}
             producer.call("publish_event",**event)
             assert len(normal.call("get_trigger",trigger_id="qa-review")["deliveries"])==1
             normal.call("save_trigger",trigger_id="qa-review",disabled=True,revision=1)

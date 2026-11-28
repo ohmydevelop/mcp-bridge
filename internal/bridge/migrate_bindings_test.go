@@ -22,8 +22,12 @@ func TestStoredStepsMigrateToPython(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var def Binding
-	rev, err := b.store.Get("binding", "old", &def)
+	var stored storedBinding
+	rev, err := b.store.Get("binding", "old", &stored)
+	def := stored.Binding
+	if err == nil {
+		def.Script, err = b.readScript(stored.Hash)
+	}
 	if err != nil || rev != 1 || def.Runtime != "python" || !reflect.DeepEqual(def.Uses, []string{"qa/list"}) {
 		t.Fatalf("migration: revision=%d deps=%v err=%v", rev, def.Uses, err)
 	}

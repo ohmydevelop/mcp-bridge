@@ -40,7 +40,13 @@ func (b *Bridge) callUpstream(ctx context.Context, p Principal, id, n string, ar
 	if !ok {
 		return nil, errors.New("tool unavailable")
 	}
-	result, e := r.session.CallTool(ctx, &mcp.CallToolParams{Name: n, Arguments: arguments})
+	var result *mcp.CallToolResult
+	var e error
+	if _, offered := r.session.InitializeResult().Capabilities.Extensions[tasksExt]; offered && r.session.InitializeResult().ProtocolVersion == modernVersion && (observe != nil || ctx.Value(backgroundKey{}) != nil) {
+		result, e = workerCall(ctx, r, n, arguments)
+	} else {
+		result, e = r.session.CallTool(ctx, &mcp.CallToolParams{Name: n, Arguments: arguments})
+	}
 	eligible := readOnly && e == nil && result != nil && !result.IsError
 	tool := id + "/" + n
 	if observe != nil {

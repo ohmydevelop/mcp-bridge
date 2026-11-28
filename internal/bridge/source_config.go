@@ -20,8 +20,8 @@ type sourceRequest struct {
 }
 
 func (b *Bridge) sourceTools(v *view) {
-	tool(v.server, "bridge_create_source", "Connect a new MCP source or install a local plugin. Use dry_run to inspect choices and settings.", func(ctx context.Context, in sourceRequest) (any, error) { return b.configure(ctx, v.user, in, 0) })
-	tool(v.server, "bridge_update_source", "Patch a source by ID and revision. Omitted fields are retained. Supply package_path to upgrade its plugin.", func(ctx context.Context, in struct {
+	tool(v, "bridge_create_source", "Connect a new MCP source or install a local plugin. Use dry_run to inspect choices and settings.", func(ctx context.Context, in sourceRequest) (any, error) { return b.configure(ctx, v.user, in, 0) })
+	tool(v, "bridge_update_source", "Patch a source by ID and revision. Omitted fields are retained. Supply package_path to upgrade its plugin.", func(ctx context.Context, in struct {
 		ID       string `json:"source_id"`
 		Revision int    `json:"revision"`
 		Patch    Object `json:"patch"`
@@ -150,6 +150,9 @@ func (b *Bridge) configure(ctx context.Context, p Principal, in sourceRequest, r
 		}
 	}
 	if in.Dry {
+		if rev == 0 {
+			s.Owner = p.Name
+		}
 		_, e := b.resolve(s)
 		return Object{"state": "preview", "source_id": s.ID}, e
 	}
@@ -165,6 +168,9 @@ func (b *Bridge) sourceStatus(id string) (Object, error) {
 	live := b.live[id] != nil
 	b.mu.RUnlock()
 	out := Object{"source_id": id, "revision": rev, "type": s.Type, "ready": live || !s.Disabled && s.Type == "package" && s.Server == "", "package": s.Package, "server": s.Server, "disabled": s.Disabled, "grants": s.Grants, "hidden": s.Hidden, "events": s.Events, "aliases": s.Aliases}
+	if s.OAuth != nil {
+		out["oauth"] = Object{"mode": s.OAuth.Mode, "scopes": s.OAuth.Scopes}
+	}
 	if s.Package != "" {
 		dir, e := b.packageDir(s.Package)
 		if e != nil {

@@ -283,10 +283,9 @@ func permittedURL(raw string) bool {
 func (b *Bridge) eventTools(v *view) {
 	b.webhookMethods(v)
 	p := v.user
-	s := v.server
-	tool(s, "search_event_types", "Find events to subscribe to, including the source, filters and delivery modes.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchEvents(ctx, p, q) })
-	tool(s, "bridge_save_destination", "Create/replace with destination and revision, or patch with destination_id, patch and its current revision. Arrays replace in full. CLI configuration requires local stdio.", func(ctx context.Context, in destinationInput) (any, error) { return b.saveDestination(ctx, p, in) })
-	tool(s, "save_trigger", "Create an event or five-field cron trigger. Event when: source_id and event_name. Schedule when: five-field cron and IANA timezone. Optional handler takes run(args,ctx) with event or scheduled_at, returns {action:notify,data:...} or {action:skip,reason:...}. Pin its saved tool_id and revision. Omit revision or use 0 to create. Supply the current revision to update.", func(ctx context.Context, in flowInput) (any, error) {
+	tool(v, "search_event_types", "Find events to subscribe to, including the source, filters and delivery modes.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchEvents(ctx, p, q) })
+	tool(v, "bridge_save_destination", "Create/replace with destination and revision, or patch with destination_id, patch and its current revision. Arrays replace in full. CLI configuration requires local stdio.", func(ctx context.Context, in destinationInput) (any, error) { return b.saveDestination(ctx, p, in) })
+	tool(v, "save_trigger", "Create an event or five-field cron trigger. Event when: source_id and event_name. Schedule when: five-field cron and IANA timezone. Optional handler takes run(args,ctx) with event or scheduled_at, returns {action:notify,data:...} or {action:skip,reason:...}. Pin its saved tool_id and revision. Omit revision or use 0 to create. Supply the current revision to update.", func(ctx context.Context, in flowInput) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
 		if !identifier.MatchString(in.ID) {

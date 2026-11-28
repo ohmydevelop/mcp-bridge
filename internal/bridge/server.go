@@ -24,8 +24,11 @@ type inputQuery struct {
 	Offset int    `json:"offset,omitempty"`
 }
 
-func tool[I any](s *mcp.Server, name, desc string, fn func(context.Context, I) (any, error)) {
-	mcp.AddTool(s, &mcp.Tool{Name: name, Description: desc}, func(ctx context.Context, _ *mcp.CallToolRequest, in I) (*mcp.CallToolResult, any, error) {
+func tool[I any](v *view, name, desc string, fn func(context.Context, I) (any, error)) {
+	if v.reserved != nil {
+		v.reserved[name] = true
+	}
+	mcp.AddTool(v.server, &mcp.Tool{Name: name, Description: desc}, func(ctx context.Context, _ *mcp.CallToolRequest, in I) (*mcp.CallToolResult, any, error) {
 		v, e := fn(ctx, in)
 		if e != nil {
 			return nil, nil, e
@@ -62,10 +65,20 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		b.producerTool(s, source)
 		return s
 	}
-	s := mcp.NewServer(mcpinfo.Implementation, serverOptions())
-	v := &view{user: p, server: s}
+	opts := serverOptions()
+	opts.SubscribeHandler = func(ctx context.Context, req *mcp.SubscribeRequest) error {
+		return b.resourceSubscription(ctx, p, req.Params.URI, true)
+	}
+	opts.UnsubscribeHandler = func(ctx context.Context, req *mcp.UnsubscribeRequest) error {
+		return b.resourceSubscription(ctx, p, req.Params.URI, false)
+	}
+	opts.CompletionHandler = func(ctx context.Context, req *mcp.CompleteRequest) (*mcp.CompleteResult, error) {
+		return b.completeReference(ctx, p, req.Params)
+	}
+	s := mcp.NewServer(mcpinfo.Implementation, opts)
+	v := &view{user: p, server: s, reserved: map[string]bool{"call_tool": true, mcpinfo.ExecuteScript: true, "bridge_open_app": true}}
 	b.views[p] = v
-	tool(s, "bridge_list_sources", "List configured, authorized sources and their connection status.", func(_ context.Context, q inputQuery) (any, error) {
+	tool(v, "bridge_list_sources", "List configured, authorized sources and their connection status.", func(_ context.Context, q inputQuery) (any, error) {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
 		ids := []string{}
@@ -90,7 +103,7 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		out, n := page(items, q.Offset)
 		return Object{"sources": out, "next_offset": n}, nil
 	})
-	tool(s, "search_tools", "Find a business tool by intent, optionally within one source. Use call_tool with the returned ID and schema.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchTools(p, q) })
+	tool(v, "search_tools", "Find a business tool by intent, optionally within one source. Use call_tool with the returned ID and schema.", func(ctx context.Context, q inputQuery) (any, error) { return b.searchTools(p, q) })
 	mcp.AddTool(s, &mcp.Tool{Name: "call_tool", Description: "Call a discovered tool using its source-qualified ID. Codex reads use the current turn automatically. Supply task_scope to override."}, func(ctx context.Context, req *mcp.CallToolRequest, in struct {
 		TaskScope string `json:"task_scope,omitempty"`
 		ID        string `json:"tool_id"`
@@ -104,12 +117,18 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 		r, e := b.call(ctx, p, src, n, in.Arguments)
 		return r, nil, e
 	})
-	tool(s, "bridge_delete_source", "Delete an unused source by ID and current revision.", func(ctx context.Context, in struct {
+	tool(v, "bridge_delete_source", "Delete an unused source by ID and current revision.", func(ctx context.Context, in struct {
 		ID       string `json:"id"`
 		Revision int    `json:"revision"`
 	}) (any, error) {
 		b.modify.Lock()
 		defer b.modify.Unlock()
+		b.mu.RLock()
+		src := b.sources[in.ID]
+		b.mu.RUnlock()
+		if src.OAuth != nil && !canUse(p.Name, src.Owner, nil) {
+			return nil, invalid("source unavailable")
+		}
 		flows, e := storage.List[Flow](b.store, "flow")
 		if e != nil {
 			return nil, e
@@ -143,11 +162,41 @@ func (b *Bridge) server(p Principal) *mcp.Server {
 	b.bindingTools(v)
 	b.management(v)
 	b.sourceTools(v)
+	b.discoveryTool(v)
+	b.oauthTool(v)
 	b.eventTools(v)
+	b.relayMethods(v)
 	b.skillTools(v)
 	if b.registerApp != nil {
 		b.registerApp(s)
 	}
 	b.publishResources(v)
+	return s
+}
+
+// A source-specific endpoint preserves the exact tool names used by an App's
+// embedded JavaScript, including when two Apps use the same callback name.
+func (b *Bridge) appServer(p Principal, source string) *mcp.Server {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	src, ok := b.sources[source]
+	if !ok || src.Disabled || !allowed(p, src) || b.live[source] == nil {
+		return nil
+	}
+	key := [2]string{p.Name, source}
+	if v := b.scopedViews[key]; v != nil {
+		return v.server
+	}
+	opts := serverOptions()
+	delete(opts.Capabilities.Extensions, skillsExt)
+	delete(opts.Capabilities.Extensions, eventsExt)
+	s := mcp.NewServer(mcpinfo.Implementation, opts)
+	v := &view{scope: source, user: p, server: s}
+	b.relayMethods(v)
+	b.publishResources(v)
+	if b.scopedViews == nil {
+		b.scopedViews = map[[2]string]*view{}
+	}
+	b.scopedViews[key] = v
 	return s
 }

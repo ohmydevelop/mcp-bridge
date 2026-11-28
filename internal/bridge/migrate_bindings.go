@@ -6,12 +6,14 @@ import (
 	"strconv"
 	"strings"
 
-	"newmcp/mcp-bridge/internal/storage"
+	"database/sql"
+	"errors"
 )
 
 // Translate persisted definitions once. Only Python is accepted at publication or execution.
 type storedBinding struct {
 	Binding
+	Hash  string `json:"source_hash,omitempty"`
 	Steps []struct {
 		ID   string `json:"id"`
 		Tool string `json:"tool_id"`
@@ -28,28 +30,76 @@ func (b *Bridge) migrateBindings() error {
 		return err
 	}
 	defer tx.Rollback()
-	defs, err := storage.ListTx[storedBinding](b.store, tx, "binding")
-	if err != nil {
-		return err
-	}
-	for _, old := range defs {
-		if old.Runtime == "python" {
-			continue
+	var lastID string
+	var lastRevision int
+	// Each version is migrated once, including unpublished and superseded tools.
+	for {
+		var id string
+		var revision int
+		var current bool
+		var data []byte
+		err = tx.QueryRow(`SELECT v.id,v.revision,v.data,EXISTS(
+			SELECT 1 FROM objects o WHERE o.kind='binding' AND o.id=v.id AND o.revision=v.revision)
+			FROM binding_versions v LEFT JOIN script_versions s USING(id,revision)
+			WHERE s.id IS NULL AND (v.id,v.revision)>(?,?) ORDER BY v.id,v.revision LIMIT 1`, lastID, lastRevision).Scan(&id, &revision, &data, &current)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
 		}
-		if len(old.Steps) == 0 || (old.Runtime != "" && old.Runtime != "steps") {
-			return fmt.Errorf("unsupported stored binding %q", old.ID)
-		}
-		def := old.python()
-		raw, err := b.store.Seal("binding", def.ID, def)
 		if err != nil {
 			return err
 		}
-		if _, err = tx.Exec("DELETE FROM binding_versions WHERE id=? AND revision=(SELECT revision FROM objects WHERE kind='binding' AND id=?)", def.ID, def.ID); err != nil {
+		lastID, lastRevision = id, revision
+		var old storedBinding
+		if err = b.store.Decode("binding", id, data, &old); err != nil {
 			return err
 		}
-		if _, err = tx.Exec("UPDATE objects SET data=? WHERE kind='binding' AND id=?", raw, def.ID); err != nil {
+		def := old.Binding
+		if old.Runtime != "python" {
+			if len(old.Steps) == 0 || (old.Runtime != "" && old.Runtime != "steps") {
+				return fmt.Errorf("unsupported stored binding %q", id)
+			}
+			def = old.python()
+		}
+		record, err := b.snapshot(def)
+		if err != nil {
 			return err
 		}
+		raw, err := b.store.Seal("binding", id, record)
+		if err != nil {
+			return err
+		}
+		if current {
+			// Updating the live object archives its new representation at the same revision.
+			if _, err = tx.Exec("DELETE FROM binding_versions WHERE id=? AND revision=?", id, revision); err != nil {
+				return err
+			}
+			if _, err = tx.Exec("UPDATE objects SET data=? WHERE kind='binding' AND id=?", raw, id); err != nil {
+				return err
+			}
+		} else if _, err = tx.Exec("UPDATE binding_versions SET data=? WHERE id=? AND revision=?", raw, id, revision); err != nil {
+			return err
+		}
+		if _, err = tx.Exec("INSERT INTO script_versions VALUES(?,?,?,CASE WHEN ? THEN NULL ELSE unixepoch() END)", id, revision, record.Hash, current); err != nil {
+			return err
+		}
+	}
+	// Fail before serving if a restored state directory omits or corrupts a snapshot.
+	rows, err := tx.Query("SELECT DISTINCT hash FROM script_versions")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var hash string
+		if err = rows.Scan(&hash); err != nil {
+			return err
+		}
+		if _, err = b.readScript(hash); err != nil {
+			return fmt.Errorf("verify managed script %s: %w", hash, err)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

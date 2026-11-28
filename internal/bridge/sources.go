@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,6 +28,12 @@ func (b *Bridge) replace(src Source, r *backend, remove bool) {
 		delete(b.sources, src.ID)
 	} else {
 		b.sources[src.ID] = src
+	}
+	for key, v := range b.scopedViews {
+		b.publishResources(v)
+		if remove && v.scope == src.ID {
+			delete(b.scopedViews, key)
+		}
 	}
 	for _, v := range b.views {
 		b.publishResources(v)
@@ -47,6 +54,9 @@ func (b *Bridge) saveSource(ctx context.Context, p Principal, src Source, rev in
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+	if curRev > 0 && (current.OAuth != nil || src.OAuth != nil) && !canUse(p.Name, current.Owner, nil) {
+		return nil, errors.New("source unavailable")
+	}
 	if curRev != rev {
 		return nil, errors.New("revision conflict")
 	}
@@ -62,27 +72,46 @@ func (b *Bridge) saveSource(ctx context.Context, p Principal, src Source, rev in
 	oldSrc := b.sources[src.ID]
 	old := b.live[src.ID]
 	b.mu.RUnlock()
+	pendingLogin := false
 	var next *backend
 	if !src.Disabled && config.Type != "package" {
 		prior, _ := b.resolve(oldSrc)
 		if old != nil && sameConnection(prior, config) {
 			next = old
 		} else {
-			next, e = connect(ctx, config)
-			if e != nil {
+			next, e = b.connect(ctx, config)
+			pendingLogin = errors.Is(e, loginRequired)
+			if pendingLogin && src.OAuth == nil {
+				src.OAuth = &sourceOAuth{Mode: "authorization_code"}
+				if err := src.OAuth.validate(src); err != nil {
+					return nil, err
+				}
+			}
+			if e != nil && !pendingLogin {
 				return nil, fmt.Errorf("source probe failed; configuration was not activated")
 			}
 		}
 	}
 	for event, tool := range src.Events {
-		if strings.TrimSpace(event) == "" || (!src.Disabled && tool != "" && (next == nil || next.tools[tool] == nil)) {
+		if strings.TrimSpace(event) == "" || (!pendingLogin && !src.Disabled && tool != "" && (next == nil || next.tools[tool] == nil)) {
 			if next != nil && next != old {
 				next.session.Close()
 			}
 			return nil, fmt.Errorf("invalid event or poll tool for %q", event)
 		}
 	}
-	if e = b.store.Put(p.Name, "source", src.ID, src, rev); e != nil {
+	tx, e := b.store.DB.BeginTx(ctx, nil)
+	if e == nil {
+		defer tx.Rollback()
+		e = b.store.PutTx(tx, p.Name, "source", src.ID, src, rev)
+		if e == nil && (src.OAuth == nil || oauthKey(src) != oauthKey(current)) {
+			_, e = tx.Exec("DELETE FROM oauth_grants WHERE source=?", src.ID)
+		}
+		if e == nil {
+			e = tx.Commit()
+		}
+	}
+	if e != nil {
 		if next != nil && next != old {
 			next.session.Close()
 		}
@@ -90,6 +119,10 @@ func (b *Bridge) saveSource(ctx context.Context, p Principal, src Source, rev in
 	}
 	b.replace(src, next, false)
 	state := Object{"id": src.ID, "state": "ready", "revision": rev + 1}
+	if pendingLogin {
+		state["state"] = "authorization_required"
+		state["next_tool"] = "bridge_begin_oauth"
+	}
 	if src.Disabled {
 		state["state"] = "disabled"
 	}
@@ -112,7 +145,7 @@ func (b *Bridge) reconcile(ctx context.Context, src Source) (any, error) {
 		b.replace(src, nil, false)
 		return Object{"id": src.ID, "state": "ready", "tools": 0}, nil
 	}
-	r, e := connect(ctx, config)
+	r, e := b.connect(ctx, config)
 	b.replace(src, r, false)
 	if e != nil {
 		return Object{"id": src.ID, "state": "connection_failed", "saved": true}, nil
@@ -120,7 +153,10 @@ func (b *Bridge) reconcile(ctx context.Context, src Source) (any, error) {
 	return Object{"id": src.ID, "state": "ready", "tools": len(r.tools)}, nil
 }
 
-type headersTransport struct{ headers map[string]string }
+type headersTransport struct {
+	headers   map[string]string
+	challenge *atomic.Bool
+}
 
 func (h headersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
@@ -137,12 +173,25 @@ func (h headersTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := json.NewDecoder(body).Decode(&q); err != nil {
 			return nil, err
 		}
-		r.Header.Set("Mcp-Name", q.Params.Name)
+		key := q.Params.Name
+		if taskMethod(method) {
+			key = q.Params.Task
+		}
+		r.Header.Set("Mcp-Name", key)
 	}
-	return http.DefaultTransport.RoundTrip(r)
+	res, err := http.DefaultTransport.RoundTrip(r)
+	if err == nil && h.challenge != nil && (res.StatusCode == 401 || res.StatusCode == 403) && strings.Contains(strings.ToLower(res.Header.Get("WWW-Authenticate")), "bearer") {
+		h.challenge.Store(true)
+	}
+	return res, err
 }
-func connect(ctx context.Context, src Source) (*backend, error) {
+func (b *Bridge) connect(ctx context.Context, src Source) (*backend, error) {
 	hub := &streamHub{}
+	handler, err := b.oauthHandler(src, nil)
+	if err != nil {
+		return nil, err
+	}
+	var challenge atomic.Bool
 	var transport mcp.Transport
 	switch src.Type {
 	case "stdio":
@@ -152,24 +201,38 @@ func connect(ctx context.Context, src Source) (*backend, error) {
 		for k, v := range src.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
-		transport = upstreamTransport{&mcp.CommandTransport{Command: cmd}, hub}
+		transport = &mcp.CommandTransport{Command: cmd}
 	case "sse":
-		transport = &mcp.SSEClientTransport{Endpoint: src.URL, HTTPClient: &http.Client{Transport: headersTransport{src.Headers}, CheckRedirect: rejectRedirect}}
+		transport = &mcp.SSEClientTransport{Endpoint: src.URL, HTTPClient: &http.Client{Transport: headersTransport{headers: src.Headers, challenge: &challenge}, CheckRedirect: rejectRedirect}}
 	case "streamable-http":
-		transport = &mcp.StreamableClientTransport{Endpoint: src.URL, HTTPClient: &http.Client{Transport: headersTransport{src.Headers}, CheckRedirect: rejectRedirect}}
+		t := &mcp.StreamableClientTransport{Endpoint: src.URL, HTTPClient: &http.Client{Transport: headersTransport{headers: src.Headers, challenge: &challenge}, CheckRedirect: rejectRedirect}}
+		if handler != nil {
+			t.OAuthHandler = handler
+		}
+		transport = t
 	default:
 		return nil, errors.New("unsupported transport")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	c := newClient()
-	session, e := c.Connect(ctx, transport, nil)
+	c := newClient(b.clientOptions(src, hub))
+	session, e := c.Connect(ctx, upstreamTransport{transport, hub}, nil)
 	if e != nil {
+		if challenge.Load() && src.OAuth == nil && len(src.Headers) == 0 {
+			return nil, loginRequired
+		}
 		return nil, e
 	}
 	r, err := readCatalog(ctx, session, hub)
 	if err != nil {
 		session.Close()
+		if challenge.Load() && src.OAuth == nil && len(src.Headers) == 0 {
+			return nil, loginRequired
+		}
+	}
+	if r != nil {
+		r.transportSource = src
+		r.oauth = handler
 	}
 	return r, err
 }

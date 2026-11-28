@@ -84,6 +84,14 @@ Select `echo-event` as the trigger's destination. Each preset runs deliveries se
 
 Previously saved webhook destinations, trigger references, and pending webhook deliveries remain valid. Update callers of `bridge_save_webhook` and `bridge_delete_webhook` to `bridge_save_destination` and `bridge_delete_destination`. The webhook payload is unchanged; the optional destination `type` defaults to `webhook`.
 
+## Retiring a trigger and its destination
+
+Each destination in `bridge_get_status` includes `trigger_count`. This counts all configured triggers, including paused ones. A zero count helps identify unused targets. Pending runs can still hold a destination selected before a configuration edit.
+
+For a dedicated destination, pass `{"trigger_id":"daily-report","revision":3,"delete_unused_destination":true}` to `delete_trigger`. The trigger and eligible destination are removed together. Check `destination_cleanup` to see whether Bridge removed the target or kept it for another trigger, queued run, or in-flight delivery. Shared targets owned by another identity, file presets, and launcher-managed terminals are retained. CLI configuration changes require a local connection. Omitting the flag preserves the destination for reuse. Previously detached managed targets can be removed with `bridge_delete_destination` and their current revision after outstanding work finishes.
+
+Deleted trigger instances retain their runs, receipts, and promotion reviews for 30 days from deletion. A minute-based sweep removes expired archives when their deliveries have finished. Existing archives get 30 days from the first upgrade with retention support. Recreating the same trigger ID starts a separate instance.
+
 ## Change a CLI target and verify one delivery
 
 For an existing schedule named `daily-report` that uses the CLI destination `report`, make these four MCP calls over local stdio.

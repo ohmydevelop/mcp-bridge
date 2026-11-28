@@ -111,13 +111,21 @@ func (b *Bridge) destinationStatus(p Principal, revisions map[string]int) ([]Obj
 	if err != nil {
 		return nil, err
 	}
+	refs := map[string]int{}
+	flows, err := storage.List[Flow](b.store, "flow")
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range flows {
+		refs[f.Destination]++
+	}
 	out := []Object{}
 	for _, d := range ds {
 		if !canUse(p.Name, d.Owner, d.Grants) {
 			delete(revisions, d.ID)
 			continue
 		}
-		row := Object{"id": d.ID, "type": d.kind(), "revision": revisions[d.ID]}
+		row := Object{"id": d.ID, "type": d.kind(), "revision": revisions[d.ID], "trigger_count": refs[d.ID]}
 		switch d.kind() {
 		case "terminal_session":
 			row["online"] = b.terminalOnline(d.ID)

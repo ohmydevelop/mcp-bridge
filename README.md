@@ -4,7 +4,7 @@
 - **Python 编排** — Agent 可用脚本组合多个工具，先临时执行，再将同一脚本发布为可复用工具。
 - **事件与定时触发** — Bridge 按事件或计划运行任务，将结果投递到 Agent 终端、webhook 或批处理 CLI。
 
-MCP Bridge 支持本机 stdio 和 Streamable HTTP 接入。已有运行中的实例可直接配置客户端。
+MCP Bridge 支持本机 stdio 和 Streamable HTTP 接入。已有运行中的实例可直接配置客户端。上游授权、Apps、服务发现、客户端能力声明和文件中继部署见 [MCP 协议与扩展配置](docs/mcp-extensions.md)。
 
 Apple Silicon macOS 和 Windows 11 x64 的压缩包提供用户级安装、登录自启动和原生 Python handler。[安装与验收说明](docs/platforms.md)
 

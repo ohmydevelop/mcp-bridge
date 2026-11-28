@@ -40,7 +40,7 @@ func Open(dir string, key []byte) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 3 {
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 4 {
 		db.Close()
 		return nil, fmt.Errorf("unreadable or unsupported storage schema %d", version)
 	}
@@ -67,7 +67,21 @@ func Open(dir string, key []byte) (*Store, error) {
  CREATE TABLE IF NOT EXISTS trigger_reviews(instance TEXT,candidate INTEGER,config INTEGER,samples INTEGER,result TEXT,PRIMARY KEY(instance,candidate,config,samples));
  CREATE TABLE IF NOT EXISTS trigger_clock(instance TEXT PRIMARY KEY, checked INTEGER);
  CREATE TABLE IF NOT EXISTS local_deliveries(id TEXT PRIMARY KEY REFERENCES deliveries(id),kind TEXT NOT NULL,result BLOB);
- PRAGMA user_version=3; COMMIT;
+ CREATE TABLE IF NOT EXISTS script_versions(id TEXT,revision INTEGER,hash TEXT NOT NULL,retired_at INTEGER,PRIMARY KEY(id,revision));
+ CREATE INDEX IF NOT EXISTS script_expiry ON script_versions(retired_at);
+ CREATE TRIGGER IF NOT EXISTS retire_script_update AFTER UPDATE OF revision ON objects WHEN OLD.kind='binding' BEGIN
+ UPDATE script_versions SET retired_at=unixepoch() WHERE id=OLD.id AND revision=OLD.revision; END;
+ CREATE TRIGGER IF NOT EXISTS retire_script_delete AFTER DELETE ON objects WHEN OLD.kind='binding' BEGIN
+ UPDATE script_versions SET retired_at=unixepoch() WHERE id=OLD.id AND revision=OLD.revision; END;
+ CREATE TABLE IF NOT EXISTS run_changes(id TEXT PRIMARY KEY,updated INTEGER);
+ CREATE TRIGGER IF NOT EXISTS run_changed AFTER UPDATE OF status ON trigger_runs BEGIN
+ INSERT OR REPLACE INTO run_changes VALUES(NEW.id,unixepoch()); END;
+ CREATE TRIGGER IF NOT EXISTS delivery_changed AFTER UPDATE OF status ON deliveries WHEN EXISTS(SELECT 1 FROM trigger_runs WHERE id=NEW.id) BEGIN
+ INSERT OR REPLACE INTO run_changes VALUES(NEW.id,unixepoch()); END;
+ CREATE TRIGGER IF NOT EXISTS forget_run_change AFTER DELETE ON trigger_runs BEGIN DELETE FROM run_changes WHERE id=OLD.id; END;
+ CREATE TABLE IF NOT EXISTS oauth_grants(source TEXT PRIMARY KEY,key TEXT NOT NULL,data BLOB NOT NULL);
+ CREATE TRIGGER IF NOT EXISTS remove_oauth_grant AFTER DELETE ON objects WHEN OLD.kind='source' BEGIN DELETE FROM oauth_grants WHERE source=OLD.id; END;
+ PRAGMA user_version=4; COMMIT;
  `)
 	if err != nil {
 		db.Close()

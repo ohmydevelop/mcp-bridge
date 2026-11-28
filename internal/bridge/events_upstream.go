@@ -219,14 +219,14 @@ func (b *Bridge) streamFlow(ctx context.Context, p Principal, f Flow) error {
 		}
 		return nil
 	}
-	if src.Type == "streamable-http" {
-		return modernRPC(ctx, src, "events/stream", f.Name, Object{"name": f.Name, "arguments": f.Filter, "cursor": cur}, frame)
-	}
 	b.mu.RLock()
 	r := b.live[f.Source]
 	b.mu.RUnlock()
 	if r == nil || r.hub == nil {
 		return errors.New("source unavailable")
+	}
+	if src.Type == "streamable-http" {
+		return modernRPC(ctx, src, r.oauth, "events/stream", f.Name, Object{"name": f.Name, "arguments": f.Filter, "cursor": cur}, frame)
 	}
 	return r.hub.stream(ctx, r.session, f, cur, frame)
 }

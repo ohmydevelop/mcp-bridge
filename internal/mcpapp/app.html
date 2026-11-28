@@ -29,5 +29,5 @@ function settingsForm(args,data,creating=false){
  const next=await call("bridge_get_status",{source_id:id});settingsForm({source_id:id},next);el("result").textContent="Settings saved"}catch(e){el("result").textContent=e.message}}
 }
 el("run").onclick=async()=>{try{el("settings").replaceChildren();const name=el("op").value,args=JSON.parse(el("args").value);const out=await call(name,args);el("result").textContent=JSON.stringify(out,null,2);if(name==="bridge_get_status"&&out.schema)settingsForm(args,out);if(name==="bridge_create_source"&&out.state==="preview"&&args.package_path)settingsForm(args,out,true)}catch(e){el("result").textContent=e.message}};
-rpc("ui/initialize",{appInfo:{name:"mcp-bridge",version:"0.2.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(()=>{parent.postMessage({jsonrpc:"2.0",method:"ui/notifications/initialized"},origin);el("run").disabled=false}).catch(e=>el("result").textContent=e.message)
+rpc("ui/initialize",{appInfo:{name:"mcp-bridge",version:"0.3.0"},appCapabilities:{},protocolVersion:"2026-01-26"}).then(()=>{parent.postMessage({jsonrpc:"2.0",method:"ui/notifications/initialized"},origin);el("run").disabled=false}).catch(e=>el("result").textContent=e.message)
 </script></html>

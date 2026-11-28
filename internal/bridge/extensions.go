@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,10 @@ const eventsExt = "io.modelcontextprotocol/events"
 
 type extParams struct {
 	mcp.ParamsBase
+	Notifications struct {
+		Tasks []string `json:"taskIds,omitempty"`
+	} `json:"notifications,omitzero"`
+	Task      string    `json:"taskId,omitempty"`
 	Delivery  *callback `json:"delivery,omitempty"`
 	TTL       *int64    `json:"ttlMs,omitempty"`
 	URI       string    `json:"uri,omitempty"`
@@ -29,21 +34,62 @@ type extResult struct {
 	Fields Object
 }
 
-func (r *extResult) MarshalJSON() ([]byte, error)   { return json.Marshal(r.Fields) }
-func (r *extResult) UnmarshalJSON(raw []byte) error { return json.Unmarshal(raw, &r.Fields) }
-func complete(obj Object) *extResult                { obj["resultType"] = "complete"; return &extResult{Fields: obj} }
+func (r *extResult) MarshalJSON() ([]byte, error) {
+	if r.Meta != nil {
+		r.Fields["_meta"] = r.Meta
+	}
+	return json.Marshal(r.Fields)
+}
+func (r *extResult) UnmarshalJSON(raw []byte) error {
+	return json.Unmarshal(raw, &r.Fields)
+}
+
+type upstreamResult struct{ extResult }
+
+func (r *upstreamResult) UnmarshalJSON(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&r.Fields); err != nil {
+		return err
+	}
+	if meta, ok := r.Fields["_meta"].(map[string]any); ok {
+		r.Meta = meta
+	}
+	return nil
+}
+func complete(obj Object) *extResult { obj["resultType"] = "complete"; return &extResult{Fields: obj} }
 func serverOptions() *mcp.ServerOptions {
 	caps := &mcp.ServerCapabilities{}
-	caps.AddExtension(skillsExt, Object{})
+	caps.AddExtension(skillsExt, Object{"directoryRead": true})
 	caps.AddExtension(eventsExt, Object{})
-	return &mcp.ServerOptions{Capabilities: caps, SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) { c.CacheScope = "private"; c.TTLMs = 0 }}
+	caps.AddExtension(tasksExt, Object{})
+	caps.AddExtension(uiExt, Object{})
+	caps.AddExtension(filesExt, Object{"upload": Object{}})
+	return &mcp.ServerOptions{Capabilities: caps, SetCacheable: func(_ context.Context, req mcp.Request, c *mcp.Cacheable) {
+		c.CacheScope = "private"
+		c.TTLMs = 0
+		switch req.(type) {
+		case *mcp.ListToolsRequest, *mcp.ListPromptsRequest, *mcp.ListResourcesRequest, *mcp.ListResourceTemplatesRequest:
+			c.TTLMs = 5000
+		}
+	}}
 }
-func newClient() *mcp.Client {
+func newClient(options ...*mcp.ClientOptions) *mcp.Client {
 	caps := &mcp.ClientCapabilities{}
 	caps.AddExtension(skillsExt, Object{})
 	caps.AddExtension(eventsExt, Object{})
-	c := mcp.NewClient(mcpinfo.Implementation, &mcp.ClientOptions{Capabilities: caps, MultiRoundTrip: &mcp.MultiRoundTripOptions{Disabled: true}})
-	for _, m := range []string{"skills/list", "skills/get", "events/list", "events/poll", "events/stream", "events/subscribe", "events/unsubscribe"} {
+	caps.AddExtension(uiExt, uiCapabilities())
+	opts := &mcp.ClientOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	opts.Capabilities = caps
+	opts.MultiRoundTrip = &mcp.MultiRoundTripOptions{Disabled: true}
+	c := mcp.NewClient(mcpinfo.Implementation, opts)
+	if err := mcp.AddSendingCustomMethod[*relayParams, *upstreamResult](c, relayMethod); err != nil {
+		panic(err)
+	}
+	for _, m := range []string{"skills/list", "skills/get", "resources/directory/read", "events/list", "events/poll", "events/stream", "events/subscribe", "events/unsubscribe"} {
 		if e := mcp.AddSendingCustomMethod[*extParams, *extResult](c, m); e != nil {
 			panic(e)
 		}

@@ -34,7 +34,7 @@ func (b *Bridge) publishForTrigger(ctx context.Context, actor string, def Bindin
 	if origin.Source != "bridge.builtin" || origin.Event.Name != taskReadEvent || principal == "" || len(parts) != 3 || parts[0] != "codex" || !ValidTaskScope(parts[1]) || !ValidTaskScope(parts[2]) {
 		return errors.New("expected a Codex repeated-read trigger delivery")
 	}
-	if err = b.store.PutTx(tx, actor, "binding", def.ID, def, revision); err != nil {
+	if err = b.putBinding(tx, actor, def, revision); err != nil {
 		return err
 	}
 	if err = tx.QueryRow("SELECT revision FROM objects WHERE kind='binding' AND id=?", def.ID).Scan(&revision); err != nil {

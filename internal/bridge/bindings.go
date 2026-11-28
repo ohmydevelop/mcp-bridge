@@ -52,16 +52,9 @@ func inputSchema(doc Object) (*js.Schema, error) {
 	return c.Compile("urn:bridge:tool")
 }
 func (b *Bridge) runBinding(ctx context.Context, p Principal, id string, args any) (*mcp.CallToolResult, error) {
-	var def Binding
-	revision, e := b.store.Get("binding", id, &def)
+	def, revision, e := b.readVersion(toolVersion{ID: "bridge.builtin/" + id}, p)
 	if e != nil {
-		return nil, errors.New("binding unavailable")
-	}
-	b.mu.RLock()
-	ok := b.bindingAllowed(p, def)
-	b.mu.RUnlock()
-	if !ok {
-		return nil, errors.New("binding unavailable")
+		return nil, e
 	}
 	raw, e := json.Marshal(args)
 	if e != nil {
@@ -141,7 +134,7 @@ func (b *Bridge) validateScript(p Principal, script PythonScript) error {
 }
 
 func (b *Bridge) bindingTools(v *view) {
-	tool(v.server, "bridge_get_tool", "Read a saved Python tool definition by tool_id and optional version.", func(_ context.Context, in toolVersion) (any, error) {
+	tool(v, "bridge_get_tool", "Read a saved Python tool definition by tool_id and optional version.", func(_ context.Context, in toolVersion) (any, error) {
 		def, rev, err := b.readVersion(in, v.user)
 		if err != nil {
 			return nil, err
@@ -163,7 +156,7 @@ func (b *Bridge) bindingTools(v *view) {
 		result, err := b.executePython(ctx, v.user, in.PythonScript, in.Arguments, mcpinfo.ExecuteScript, 0)
 		return result, nil, err
 	})
-	tool(v.server, "bridge_save_tool", "Publish or preview a custom business tool. Supply a Python script and its allowed upstream tools (uses). On verified promotion, pass origin_delivery_id to notify the triggering Codex thread.", func(ctx context.Context, in struct {
+	tool(v, "bridge_save_tool", "Publish or preview a custom business tool. Supply a Python script and its allowed upstream tools (uses). On verified promotion, pass origin_delivery_id to notify the triggering Codex thread.", func(ctx context.Context, in struct {
 		Binding
 		OriginDelivery string `json:"origin_delivery_id,omitempty"`
 		Revision       int    `json:"revision,omitempty"`
@@ -195,7 +188,7 @@ func (b *Bridge) bindingTools(v *view) {
 		if in.OriginDelivery != "" {
 			e = b.publishForTrigger(ctx, v.user.Name, def, in.Revision, in.OriginDelivery)
 		} else {
-			e = b.store.Put(v.user.Name, "binding", def.ID, def, in.Revision)
+			e = b.publishBinding(ctx, v.user.Name, def, in.Revision)
 		}
 		if e != nil {
 			return nil, e
@@ -206,7 +199,7 @@ func (b *Bridge) bindingTools(v *view) {
 		}
 		return Object{"tool_id": "bridge.builtin/" + def.ID, "revision": saved}, nil
 	})
-	tool(v.server, "bridge_delete_tool", "Delete a published custom tool definition by ID and current revision.", func(_ context.Context, in sourceRevision) (any, error) {
+	tool(v, "bridge_delete_tool", "Delete a published custom tool definition by ID and current revision.", func(_ context.Context, in sourceRevision) (any, error) {
 		if in.Revision < 1 {
 			return nil, errors.New("existing revision required")
 		}

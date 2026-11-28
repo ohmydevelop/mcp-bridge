@@ -80,6 +80,9 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 	if e = b.migrateBindings(); e != nil {
 		return e
 	}
+	if e = b.prepareTransfers(); e != nil {
+		return e
+	}
 	for _, s := range b.sources {
 		_, e = b.reconcile(ctx, s)
 		if e != nil {
@@ -115,19 +118,50 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 		}
 	}
 	mux := http.NewServeMux()
+	registerCards(mux)
+	mux.HandleFunc("GET /oauth/callback", b.oauthCallback)
 	mux.HandleFunc("POST /callback/{flow}", b.receiveHook)
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/mcp-file-link/{token}", func(w http.ResponseWriter, r *http.Request) { b.transfer(w, r, "") })
+	transferHandler := func(w http.ResponseWriter, r *http.Request) {
+		for name, k := range tokens {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+k)) == 1 && b.profiles[name].Producer == "" {
+				b.transfer(w, r, name)
+				return
+			}
+		}
+		http.Error(w, "unauthorized", 401)
+	}
+	mux.HandleFunc("/mcp/files/{token}", transferHandler)
+	mux.HandleFunc("/mcp/apps/{source}/files/{token}", transferHandler)
+	mcpHandler := func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		for name, k := range tokens {
 			if subtle.ConstantTimeCompare([]byte(token), []byte("Bearer "+k)) == 1 {
 				w.Header().Set("Cache-Control", "private, no-store")
-				handlers[name].ServeHTTP(w, r)
+				if source := r.PathValue("source"); source != "" {
+					if b.profiles[name].Producer != "" {
+						http.NotFound(w, r)
+						return
+					}
+					p := Principal{name}
+					s := b.appServer(p, source)
+					if s == nil {
+						http.NotFound(w, r)
+						return
+					}
+					scoped := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Stateless: true, MaxRequestBodyBytes: 8 << 20})
+					b.httpMCP(p, scoped).ServeHTTP(w, r)
+				} else {
+					handlers[name].ServeHTTP(w, r)
+				}
 				return
 			}
 		}
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		http.Error(w, "unauthorized", 401)
-	})
+	}
+	mux.HandleFunc("/mcp", mcpHandler)
+	mux.HandleFunc("/mcp/apps/{source}", mcpHandler)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		if e := b.store.DB.Ping(); e != nil {
 			http.Error(w, "unavailable", 503)
@@ -228,8 +262,27 @@ func Serve(abs, listen string, registerApp func(*mcp.Server)) error {
 			select {
 			case <-ctx.Done():
 				return
+			case <-b.catalogChanged:
+				b.syncSources(ctx)
 			case <-ticker.C:
 				b.syncSources(ctx)
+				if err := b.pruneRetired(ctx); err != nil && ctx.Err() == nil {
+					log.Print("trigger retention: ", err)
+				}
+			}
+		}
+	})
+	jobs.Go(func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			if err := b.pruneScripts(ctx); err != nil && ctx.Err() == nil {
+				log.Print("script retention: ", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 			}
 		}
 	})
